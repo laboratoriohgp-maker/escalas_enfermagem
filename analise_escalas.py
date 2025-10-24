@@ -1,4 +1,4 @@
-# app_escalas.py
+# app_escalas_profissional_refactor_v10.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,8 +7,10 @@ from pathlib import Path
 from PIL import Image
 import io
 import base64
+from datetime import datetime
+import uuid
 
-# Optional PDF generation imports (kaleido + reportlab)
+# Optional PDF generation imports
 try:
     import plotly.io as pio
     KALEIDO_AVAILABLE = True
@@ -23,28 +25,53 @@ except Exception:
     REPORTLAB_AVAILABLE = False
 
 # --------------------------
-# Config
+# Config / constantes
 # --------------------------
-st.set_page_config(page_title="Radar de Escalas de Avaliação", layout="wide")
+st.set_page_config(page_title="Radar de Escalas de Avaliação", layout="wide", initial_sidebar_state="expanded")
+
 ASELC_BLUE = "#2A327A"
 HGP_GREEN = "#006B61"
 HGP_YELLOW = "#E5B900"
-HGP_BLUE = "#0072B1"
-BG_GRAY = "#F7F8FA"
+TEXT_PRIMARY = "#1F2937"
+ACCENT_COLOR = "#3B82F6"
 
-DATA_STORE = Path("data_store.csv")   # local persistent storage
+DATA_STORE = Path("data_store.csv")            # legacy
+HISTORY_STORE = Path("history_store.csv")     # index of snapshots
+HISTORY_DIR = Path("history_snapshots")       # folder with snapshot files
+HISTORY_DIR.mkdir(exist_ok=True)
+
+REFERENCIAS_TEXT = {
+    "Curta": {"ref": 2.0, "desc": "Curta (1–3d): 1–2 avaliações — compatível com internações de curta duração."},
+    "Média": {"ref": 4.5, "desc": "Média (4–10d): 3–5 avaliações — faixa intermediária, revisar protocolos se necessário."},
+    "Longa": {"ref": 8.0, "desc": "Longa (>10d): 6–10+ avaliações — esperado para internações prolongadas."}
+}
 
 # --------------------------
-# Helper functions
+# Estilos
+# --------------------------
+st.markdown(f"""
+<style>
+.stApp {{ background: linear-gradient(135deg, #F5F7FA 0%, #EEF2F6 100%); }}
+.main-header {{ background: linear-gradient(135deg, {HGP_YELLOW} 0%, #FFE6A7 100%); padding: 2.0rem 1.2rem; border-radius: 12px; display:flex; align-items:center; justify-content:space-between; gap:1rem; margin-bottom:2rem; }}
+.main-title {{ color: {ASELC_BLUE}; font-size:2.2rem; font-weight:900; margin:0; }}
+.main-sub {{ color: {ASELC_BLUE}; margin-top:0.4rem; }}
+.success-box {{ background:#D1FAE5; border-left:4px solid #10B981; padding:10px; border-radius:8px; margin:8px 0; }}
+.section-title {{ font-weight:700; margin-top:12px; margin-bottom:6px; color:{TEXT_PRIMARY}; }}
+.info-box {{ background:#EFF6FF; border-left:4px solid #3B82F6; padding:10px; border-radius:8px; margin:8px 0; }}
+</style>
+""", unsafe_allow_html=True)
+
+# --------------------------
+# Helpers
 # --------------------------
 def load_local_logos():
     logos = {}
     if Path("logo_aselc.png").exists():
-        logos['aselc'] = Image.open("logo_aselc.png")
-    elif Path("logo aselc.png").exists():
-        logos['aselc'] = Image.open("logo aselc.png")
+        try: logos["aselc"] = Image.open("logo_aselc.png")
+        except: pass
     if Path("logo_hgp.png").exists():
-        logos['hgp'] = Image.open("logo_hgp.png")
+        try: logos["hgp"] = Image.open("logo_hgp.png")
+        except: pass
     return logos
 
 def safe_read_excel(uploaded_file):
@@ -54,421 +81,428 @@ def safe_read_excel(uploaded_file):
         st.error(f"Erro ao ler Excel: {e}")
         return None
 
-def persist_df(df):
-    df.to_csv(DATA_STORE, index=False)
-
-def load_persisted():
-    if DATA_STORE.exists():
-        return pd.read_csv(DATA_STORE)
-    return pd.DataFrame(columns=[
-        "Mês","Setor","Tipo_Internacao","Escala","Qtd_Escalas","Qtd_Pacientes"
-    ])
+def normalize_col_name(name: str) -> str:
+    s = str(name).strip().lower()
+    for a,b in {"ã":"a","á":"a","é":"e","í":"i","ó":"o","ú":"u","ç":"c"}.items():
+        s = s.replace(a,b)
+    return s.replace(" ", "_")
 
 def prepare_dataframe(df):
-    # Normalize columns (accept multiple naming styles)
     df = df.copy()
-    col_map = {}
-    cols = [c.strip().lower().replace(" ", "_") for c in df.columns]
-    for orig, norm in zip(df.columns, cols):
-        col_map[orig] = norm
+    col_map = {c: normalize_col_name(c) for c in df.columns}
     df.rename(columns=col_map, inplace=True)
-    # Try to map required columns to canonical names
     mapping = {}
-    # month
-    for c in ['mês','mes','month','m']:
-        if c in df.columns:
-            mapping[c] = 'Mês'
-    # setor
-    for c in ['setor','department','ward']:
-        if c in df.columns:
-            mapping[c] = 'Setor'
-    # tipo internação
-    for c in ['tipo_de_internacao','tipo_internacao','tipo','internacao','tipo_de_internação']:
-        if c in df.columns:
-            mapping[c] = 'Tipo_Internacao'
-    # escala
-    for c in ['escala','tipo_de_escala','tipo_escala']:
-        if c in df.columns:
-            mapping[c] = 'Escala'
-    # qtd escalas
-    for c in ['quantidade_de_escalas','qtd_escalas','qtd_escalas','quantidade_escalas','qtd_escalas']:
-        if c in df.columns:
-            mapping[c] = 'Qtd_Escalas'
-    # qtd pacientes
-    for c in ['pacientes_internados','qtd_pacientes','qtd_pacientes','pacientes','pacientes_internados']:
-        if c in df.columns:
-            mapping[c] = 'Qtd_Pacientes'
-    # Apply mapping if found
-    df = df.rename(columns=mapping)
-    # Keep only canonical cols (if they're present)
-    expected = ['Mês','Setor','Tipo_Internacao','Escala','Qtd_Escalas','Qtd_Pacientes']
-    for c in expected:
-        if c not in df.columns:
-            df[c] = np.nan
-    df = df[expected]
-    # Strip strings
-    df['Setor'] = df['Setor'].astype(str).str.strip().str.title()
-    df['Escala'] = df['Escala'].astype(str).str.strip().str.title()
-    df['Tipo_Internacao'] = df['Tipo_Internacao'].astype(str).str.strip().str.title()
-    # Numeric conversions
-    df['Qtd_Escalas'] = pd.to_numeric(df['Qtd_Escalas'], errors='coerce').fillna(0).astype(float)
-    df['Qtd_Pacientes'] = pd.to_numeric(df['Qtd_Pacientes'], errors='coerce').fillna(0).astype(float)
-    return df
+    for c in ["setor","sector","unidade","department"]:
+        if c in df.columns: mapping[c] = "Setor"; break
+    for c in ["tipo_de_escala","tipo_escala","escala","tipodeescala"]:
+        if c in df.columns: mapping[c] = "Tipo_Escala"; break
+    for c in ["quantidade_de_escalas","qtd_escalas","escalas","quantidadeescalas"]:
+        if c in df.columns: mapping[c] = "Qtd_Escalas"; break
+    for c in ["pacientes_internados","qtd_pacientes","pacientes"]:
+        if c in df.columns: mapping[c] = "Qtd_Pacientes"; break
+    for c in ["mes","mês","month","data","periodo"]:
+        if c in df.columns: mapping[c] = "Mes"; break
+    df.rename(columns=mapping, inplace=True)
+    expected = ["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"]
+    missing = [c for c in expected if c not in df.columns]
+    if missing:
+        st.warning(f"Colunas faltando: {', '.join(missing)}. Retornando DataFrame padronizado vazio.")
+        return pd.DataFrame(columns=expected)
+    df = df[expected].copy()
+    df["Setor"] = df["Setor"].astype(str).str.strip().str.title()
+    df["Tipo_Escala"] = df["Tipo_Escala"].astype(str).str.strip().str.title()
+    df["Mes"] = df["Mes"].astype(str).str.strip().str.title()
+    df["Qtd_Escalas"] = pd.to_numeric(df["Qtd_Escalas"], errors="coerce").fillna(0)
+    df["Qtd_Pacientes"] = pd.to_numeric(df["Qtd_Pacientes"], errors="coerce").fillna(0)
+    df = df[(df["Qtd_Escalas"] > 0) & (df["Qtd_Pacientes"] > 0)]
+    return df.reset_index(drop=True)
 
 def compute_metrics(df, sector_adjust_map):
     df = df.copy()
-    # Escalas por paciente (aggregate)
-    # If raw patient-level data present, you could compute true medians — here we work with aggregated rows
-    df['Escalas_por_Paciente'] = df.apply(
-        lambda r: (r['Qtd_Escalas'] / r['Qtd_Pacientes']) if r['Qtd_Pacientes'] > 0 else 0.0, axis=1
-    )
-    # Determine factor de ajuste por setor (configurable)
+    if df.empty: return df
+    df["Escalas_por_Paciente"] = df.apply(lambda r: round(r["Qtd_Escalas"]/r["Qtd_Pacientes"],2) if r["Qtd_Pacientes"]>0 else 0.0, axis=1)
     def factor_for_setor(setor):
-        for key, val in sector_adjust_map.items():
-            if key.lower() in setor.lower():
-                return val
+        s = setor.lower() if isinstance(setor, str) else ""
+        for k,v in sector_adjust_map.items():
+            if k in s: return v
         return 1.0
-    df['Fator_Ajuste'] = df['Setor'].apply(factor_for_setor)
-    # Mediana por escala (here median across rows of the same Escala in the chosen subset)
-    # Mediana ajustada:
-    df['Mediana_Ajustada'] = (df['Escalas_por_Paciente'] * df['Fator_Ajuste']).round(2)
+    df["Fator_Ajuste"] = df["Setor"].apply(factor_for_setor)
+    df["Mediana_Ajustada"] = (df["Escalas_por_Paciente"] * df["Fator_Ajuste"]).round(2)
     return df
 
-def make_radar_figure(escalas, valores_real, referencia_vals, title):
-    # referencias: dict with keys 'Curta','Media','Longa' -> numeric
-    fig = go.Figure()
-    # Add reference bands as translucent polygons
-    # We'll stack by increasing reference
-    colors_ref = {
-        'Curta (1–3d)': 'rgba(42,50,122,0.12)',     # ASELC blue light
-        'Média (4–10d)': 'rgba(229,181,0,0.12)',    # yellow light
-        'Longa (>10d)': 'rgba(0,107,97,0.08)'       # HGP green light
-    }
-    # For each reference, create a polygon same length as escalas
-    for k,v in referencia_vals.items():
-        fig.add_trace(go.Scatterpolar(
-            r=[v]*len(escalas),
-            theta=escalas,
-            fill='toself',
-            name=f"{k} (ref.)",
-            opacity=0.25,
-            line=dict(color=colors_ref.get(k,'rgba(200,200,200,0.5)'))
-        ))
-    # Add observed median line
-    fig.add_trace(go.Scatterpolar(
-        r=valores_real,
-        theta=escalas,
-        fill='toself',
-        name='Mediana Real Ajustada',
-        line=dict(color=ASELC_BLUE, width=3)
-    ))
-    fig.update_layout(
-        polar=dict(
-            radialaxis=dict(visible=True, range=[0, max(max(valores_real) if valores_real else 1, max(referencia_vals.values())) + 1])
-        ),
-        showlegend=True,
-        title=title,
-        height=600
-    )
-    return fig
+def aggregate_for_dashboard(df_subset):
+    grp = df_subset.groupby("Tipo_Escala").agg(
+        Qtd_Escalas=("Qtd_Escalas","sum"),
+        Qtd_Pacientes=("Qtd_Pacientes","max"),
+        Fator_Ajuste=("Fator_Ajuste","first")
+    ).reset_index()
+    grp["Escalas_por_Paciente"] = grp.apply(lambda r: round(r["Qtd_Escalas"]/r["Qtd_Pacientes"],2) if r["Qtd_Pacientes"]>0 else 0.0, axis=1)
+    grp["Mediana_Ajustada"] = (grp["Escalas_por_Paciente"] * grp["Fator_Ajuste"]).round(2)
+    return grp
 
-def make_bar_patients_chart(escalas, pacientes, title):
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=escalas,
-        y=pacientes,
-        marker_color=HGP_GREEN,
-        name='Pacientes Internados'
-    ))
-    fig.update_layout(title=title, yaxis_title='Pacientes', height=420)
-    return fig
+def save_history_snapshot(df_snapshot, source_name="uploaded"):
+    now = datetime.now().isoformat(timespec="seconds")
+    snap_id = str(uuid.uuid4())[:8]
+    meta = {"snapshot_id": snap_id, "timestamp": now, "source": source_name, "n_rows": len(df_snapshot)}
+    hist_df = pd.DataFrame([meta])
+    if HISTORY_STORE.exists():
+        try:
+            prev = pd.read_csv(HISTORY_STORE)
+            hist_df = pd.concat([prev, hist_df], ignore_index=True)
+        except Exception:
+            pass
+    hist_df.to_csv(HISTORY_STORE, index=False)
+    fname = HISTORY_DIR / f"history_snapshot_{snap_id}.csv"
+    df_snapshot.to_csv(fname, index=False)
+    return snap_id, fname.name
+
+def load_history_index():
+    if HISTORY_STORE.exists():
+        try:
+            return pd.read_csv(HISTORY_STORE)
+        except Exception:
+            return pd.DataFrame(columns=["snapshot_id","timestamp","source","n_rows"])
+    return pd.DataFrame(columns=["snapshot_id","timestamp","source","n_rows"])
+
+def delete_history_snapshots(ids):
+    idx = load_history_index()
+    if idx.empty: return 0
+    to_keep = idx[~idx["snapshot_id"].isin(ids)]
+    to_delete = idx[idx["snapshot_id"].isin(ids)]
+    # delete files
+    deleted = 0
+    for sid in to_delete["snapshot_id"].tolist():
+        f = HISTORY_DIR / f"history_snapshot_{sid}.csv"
+        try:
+            if f.exists(): f.unlink(); deleted += 1
+        except Exception:
+            pass
+    to_keep.to_csv(HISTORY_STORE, index=False)
+    return deleted
+
+def load_snapshot_df(snapshot_id):
+    f = HISTORY_DIR / f"history_snapshot_{snapshot_id}.csv"
+    if f.exists():
+        try:
+            df = pd.read_csv(f)
+            df = prepare_dataframe(df) if not df.empty else df
+            return df
+        except Exception:
+            return pd.DataFrame(columns=["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"])
+    return pd.DataFrame(columns=["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"])
+
+def df_to_download_bytes(df, fmt="csv"):
+    if fmt == "csv":
+        return df.to_csv(index=False).encode("utf-8"), "text/csv"
+    else:
+        towrite = io.BytesIO()
+        with pd.ExcelWriter(towrite, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False)
+        return towrite.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 def download_link_df(df, name="export.csv"):
-    csv = df.to_csv(index=False)
-    b64 = base64.b64encode(csv.encode()).decode()
-    href = f'<a href="data:file/csv;base64,{b64}" download="{name}">⬇️ Baixar dados (CSV)</a>'
+    bts, mime = df_to_download_bytes(df, "csv")
+    b64 = base64.b64encode(bts).decode()
+    href = f'<a href="data:file/csv;base64,{b64}" download="{name}" style="text-decoration:none;background:{ACCENT_COLOR};color:white;padding:6px 10px;border-radius:6px;font-weight:700;">⬇️ Baixar CSV</a>'
     return href
 
-def try_export_pdf(figures, title="Relatório"):
-    """
-    Export minimal PDF with images of provided Plotly figures.
-    Requires kaleido and reportlab to be available.
-    Returns bytes of PDF or None.
-    """
-    if not KALEIDO_AVAILABLE or not REPORTLAB_AVAILABLE:
-        return None, "PDF export requires package 'kaleido' and 'reportlab' installed."
-    # render each fig to png bytes
-    pngs = []
-    for f in figures:
-        img_bytes = pio.to_image(f, format='png', width=1000, height=600, scale=1)
-        pngs.append(img_bytes)
-    # create PDF
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
-    w, h = A4
-    # add title
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(40, h - 40, title)
-    y = h - 80
-    for img in pngs:
-        # insert image
-        img_io = io.BytesIO(img)
-        # scale to fit width
-        img_pil = Image.open(img_io)
-        iw, ih = img_pil.size
-        ratio = (w - 80) / iw
-        img_w = iw * ratio
-        img_h = ih * ratio
-        if y - img_h < 40:
-            c.showPage()
-            y = h - 40
-        c.drawInlineImage(img_pil, 40, y - img_h, width=img_w, height=img_h)
-        y = y - img_h - 20
-    c.save()
-    buffer.seek(0)
-    return buffer.read(), None
+# Plot helpers
+def make_radar_figure(escalas, valores_real, referencia_vals):
+    fig = go.Figure()
+    theta = escalas + ([escalas[0]] if escalas else [])
+    for k,v in referencia_vals.items():
+        r = [v]*len(theta)
+        fig.add_trace(go.Scatterpolar(r=r, theta=theta, fill="toself", name=f"{k} (ref.)", opacity=0.18))
+    if valores_real:
+        r_real = valores_real + [valores_real[0]]
+        fig.add_trace(go.Scatterpolar(r=r_real, theta=theta, fill="toself", name="Mediana Ajustada", line=dict(color=ASELC_BLUE, width=3)))
+    max_ref = max(referencia_vals.values()) if referencia_vals else 1
+    max_val = max(max(valores_real) if valores_real else 1, max_ref)
+    fig.update_layout(polar=dict(radialaxis=dict(range=[0, max_val+2])), height=560, margin=dict(t=20))
+    return fig
+
+def make_bar_mean_chart(escalas, medias, title):
+    fig = go.Figure()
+    colors = [HGP_YELLOW if i%2==0 else HGP_GREEN for i in range(len(escalas))]
+    fig.add_trace(go.Bar(x=escalas, y=medias, marker_color=colors, text=[f"{v:.2f}" for v in medias], textposition="outside"))
+    fig.update_layout(title=title, yaxis_title="Escalas por Paciente", height=420, margin=dict(t=80))
+    return fig
 
 # --------------------------
-# UI: Header with logos
+# UI Header
 # --------------------------
 logos = load_local_logos()
-col1, col2, col3 = st.columns([1,6,1])
-with col1:
-    if 'aselc' in logos:
-        st.image(logos['aselc'], width=140)
-with col2:
-    st.markdown("<h2 style='text-align:center;color:{}'>Painel Profissional — Escalas por Paciente</h2>".format(ASELC_BLUE), unsafe_allow_html=True)
-    st.markdown("<p style='text-align:center;color:gray'>Comparativo real vs referências por tipo de internação — ASELC / HGP</p>", unsafe_allow_html=True)
-with col3:
-    if 'hgp' in logos:
-        st.image(logos['hgp'], width=140)
+left_html = right_html = ""
+if "aselc" in logos:
+    buf = io.BytesIO(); logos["aselc"].save(buf, format="PNG"); left_html = base64.b64encode(buf.getvalue()).decode()
+if "hgp" in logos:
+    buf = io.BytesIO(); logos["hgp"].save(buf, format="PNG"); right_html = base64.b64encode(buf.getvalue()).decode()
 
-st.markdown("---")
+st.markdown(f"""
+<div class="main-header">
+  <div style="width:160px;text-align:left">{f"<img src='data:image/png;base64,{left_html}' style='max-width:140px;height:auto;'/>" if left_html else ""}</div>
+  <div style="text-align:center;">
+    <div class="main-title">📊 Painel de Escalas por Paciente</div>
+    <div class="main-sub">Análise comparativa de avaliações — ASELC / HGP</div>
+  </div>
+  <div style="width:160px;text-align:right">{f"<img src='data:image/png;base64,{right_html}' style='max-width:140px;height:auto;'/>" if right_html else ""}</div>
+</div>
+""", unsafe_allow_html=True)
 
 # --------------------------
-# Data source selection
+# Sidebar: upload, histórico com seleção e exclusão
 # --------------------------
-colA, colB = st.columns(2)
-with colA:
-    st.subheader("1) Carregar dados (opcional)")
-    uploaded = st.file_uploader("Envie a planilha enxuta (opcional). Colunas esperadas: Mês, Setor, Tipo_Internacao, Escala, Qtd_Escalas, Qtd_Pacientes", type=["xlsx","xls","csv"])
-    if uploaded:
-        if str(uploaded.name).lower().endswith(".csv"):
-            raw = pd.read_csv(uploaded)
+with st.sidebar:
+    st.markdown("### ⚙️ Configurações e Histórico")
+    st.markdown("**Upload**")
+    uploaded = st.file_uploader("Envie Excel ou CSV", type=["xlsx","xls","csv"], key="uploader")
+
+    st.markdown("---")
+    st.markdown("**Histórico salvo (snapshots)**")
+    hist_index = load_history_index()
+    if not hist_index.empty:
+        hist_index_sorted = hist_index.sort_values("timestamp", ascending=False).reset_index(drop=True)
+        st.dataframe(hist_index_sorted, use_container_width=True)
+        # multi-select for analysis
+        sel_ids = st.multiselect("Selecione 1 ou mais snapshots para análise", options=hist_index_sorted["snapshot_id"].tolist(), default=[], help="Ao selecionar, apenas os snapshots escolhidos serão usados na análise quando 'Usar snapshots selecionados' for clicado.")
+        col1, col2 = st.columns([1,1])
+        with col1:
+            if st.button("🗑️ Apagar snapshots selecionados"):
+                if not sel_ids:
+                    st.warning("Nenhum snapshot selecionado para apagar.")
+                else:
+                    deleted = delete_history_snapshots(sel_ids)
+                    st.success(f"{deleted} snapshots apagados.")
+                    st.experimental_rerun()
+        with col2:
+            if st.button("✅ Usar snapshots selecionados na análise"):
+                if not sel_ids:
+                    st.warning("Selecione ao menos um snapshot para usar.")
+                else:
+                    st.session_state["use_snapshots_ids"] = sel_ids
+                    st.success(f"{len(sel_ids)} snapshots marcados para uso na análise atual.")
+    else:
+        st.info("Nenhum snapshot salvo ainda.")
+
+    st.markdown("---")
+    st.markdown("**Salvar histórico (snapshot)**")
+    hist_source = st.text_input("Fonte (nome do arquivo ou descrição)", value="uploaded", help="Nome do arquivo ou descrição do snapshot")
+    if st.button("💾 Salvar histórico (snapshot)"):
+        # use uploaded session df if present
+        if "df_uploaded_session" in st.session_state and st.session_state["df_uploaded_session"] is not None:
+            snap_df = st.session_state["df_uploaded_session"].copy()
+            snap_id, fname = save_history_snapshot(snap_df, source_name=hist_source or "uploaded")
+            st.success(f"Snapshot salvo: {snap_id}")
+            st.experimental_rerun()
         else:
-            raw = safe_read_excel(uploaded)
-        if raw is not None:
-            df_uploaded = prepare_dataframe(raw)
-            st.success("Arquivo carregado e formatado.")
-            if st.checkbox("Visualizar dados carregados"):
-                st.dataframe(df_uploaded)
-    else:
-        df_uploaded = None
+            st.error("Nenhum dado preparado na sessão. Faça upload antes de salvar snapshot.")
 
-with colB:
-    st.subheader("2) Dados persistidos / locais")
-    df_store = load_persisted()
-    if not df_store.empty:
-        st.write(f"Dados persistidos localmente: {len(df_store)} linhas")
-        if st.checkbox("Visualizar dados persistidos"):
-            st.dataframe(df_store)
-    else:
-        st.info("Nenhum dado salvo localmente ainda.")
+    st.markdown("---")
+    st.markdown("**Opções**")
+    include_history_all = st.checkbox("Incluir todo histórico salvo na análise (cuidado: pode duplicar dados)", value=False)
+    st.markdown("Observação: uploads não salvam automaticamente; use 'Salvar histórico' para registrar um snapshot.")
+    st.markdown("---")
+    st.markdown("**Fatores de Ajuste**")
+    fac_uti = st.number_input("UTI", value=1.20, step=0.01, format="%.2f")
+    fac_emg = st.number_input("Emergência", value=1.15, step=0.01, format="%.2f")
+    fac_enf = st.number_input("Enfermaria", value=1.00, step=0.01, format="%.2f")
+    fac_amb = st.number_input("Ambulatório", value=1.00, step=0.01, format="%.2f")
 
-# Decide base dataframe: uploaded overrides persisted unless none
-if df_uploaded is not None:
-    base_df = pd.concat([df_uploaded, df_store], ignore_index=True) if not df_store.empty else df_uploaded.copy()
+# --------------------------
+# Prepare session uploaded data (do not auto-save)
+# --------------------------
+if uploaded is not None:
+    try:
+        raw = pd.read_csv(uploaded) if str(uploaded.name).lower().endswith(".csv") else safe_read_excel(uploaded)
+    except Exception as e:
+        raw = None
+        st.sidebar.error(f"Erro ao ler arquivo: {e}")
+    if raw is not None:
+        df_uploaded = prepare_dataframe(raw)
+        if df_uploaded.empty:
+            st.sidebar.error("Nenhum dado válido após normalização.")
+            st.session_state["df_uploaded_session"] = None
+        else:
+            st.session_state["df_uploaded_session"] = df_uploaded
+            st.sidebar.success(f"{len(df_uploaded)} linhas preparadas na sessão (não salvas). Para salvar clique em 'Salvar histórico'.")
 else:
-    base_df = df_store.copy()
+    if "df_uploaded_session" not in st.session_state:
+        st.session_state["df_uploaded_session"] = None
 
-# Ensure canonical columns exist
-if base_df is None or base_df.empty:
-    st.warning("Nenhum dado disponível — use o upload ou insira manualmente os dados abaixo.")
+# --------------------------
+# Build analysis base_df according to user choices
+# --------------------------
+sector_adjust_map = {"uti": fac_uti, "emerg": fac_emg, "enferm": fac_enf, "ambulatorio": fac_amb, "aloj": 0.9}
+
+# Start with session uploaded if exists, else fallback to data_store
+if st.session_state.get("df_uploaded_session") is not None and not st.session_state["df_uploaded_session"].empty:
+    base_df = st.session_state["df_uploaded_session"].copy()
 else:
-    st.success("Dados prontos para análise.")
+    if DATA_STORE.exists():
+        try:
+            base_df = pd.read_csv(DATA_STORE)
+            base_df = prepare_dataframe(base_df) if not base_df.empty else pd.DataFrame(columns=["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"])
+        except Exception:
+            base_df = pd.DataFrame(columns=["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"])
+    else:
+        base_df = pd.DataFrame(columns=["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"])
 
-# --------------------------
-# Manual insertion form
-# --------------------------
-st.markdown("## Inserção manual / edição rápida")
-with st.form("insert_form", clear_on_submit=True):
-    c1, c2, c3 = st.columns([2,2,2])
-    mes = c1.text_input("Mês (ex: Julho)", value="")
-    setor = c2.text_input("Setor (ex: UTI Adulto)", value="")
-    tipo_int = c3.selectbox("Tipo de Internação (classificação)", ["Curta","Média","Longa","Personalizado"])
-    escala = st.text_input("Tipo de Escala (ex: Braden)", value="")
-    col1, col2 = st.columns(2)
-    qtd_escalas = col1.number_input("Qtd. Escalas", min_value=0, step=1, value=0)
-    qtd_pacientes = col2.number_input("Qtd. Pacientes Internados", min_value=0, step=1, value=0)
-    submitted = st.form_submit_button("➕ Adicionar / Atualizar")
-    if submitted:
-        new = {
-            "Mês": mes,
-            "Setor": setor.title(),
-            "Tipo_Internacao": tipo_int.title(),
-            "Escala": escala.title(),
-            "Qtd_Escalas": float(qtd_escalas),
-            "Qtd_Pacientes": float(qtd_pacientes)
-        }
-        # append to persisted store
-        df_store = load_persisted()
-        df_store = pd.concat([df_store, pd.DataFrame([new])], ignore_index=True)
-        persist_df(df_store)
-        st.success("Linha adicionada e salva localmente.")
+# Option: include either all history, or only selected snapshots, or none
+snap_ids_to_include = []
+if "use_snapshots_ids" in st.session_state and st.session_state["use_snapshots_ids"]:
+    snap_ids_to_include = st.session_state["use_snapshots_ids"]
+elif include_history_all and not load_history_index().empty:
+    snap_ids_to_include = load_history_index()["snapshot_id"].tolist()
 
-# --------------------------
-# Parametrização dos fatores setoriais (user-editable)
-# --------------------------
-st.markdown("## Ajustes & Parâmetros")
-st.markdown("### Fatores de ajuste por setor (busca parcial por nome de setor). Ex: 'Uti' aplica fator 1.2 a qualquer setor que contenha 'Uti'.")
-st.write("Se vazio, é aplicada a regra padrão: UTI -> 1.2 ; Emergência -> 1.15 ; Enfermaria -> 1.0")
+# Load selected snapshots
+snap_frames = []
+for sid in snap_ids_to_include:
+    sdf = load_snapshot_df(sid)
+    if not sdf.empty:
+        snap_frames.append(sdf)
+if snap_frames:
+    snap_concat = pd.concat(snap_frames, ignore_index=True)
+    base_df = pd.concat([base_df, snap_concat], ignore_index=True)
 
-f1, f2, f3 = st.columns(3)
-with f1:
-    fac_uti = st.number_input("Fator UTI (ex: 1.2)", value=1.20, step=0.01, format="%.2f")
-with f2:
-    fac_emg = st.number_input("Fator Emergência (ex: 1.15)", value=1.15, step=0.01, format="%.2f")
-with f3:
-    fac_enf = st.number_input("Fator Enfermaria (ex: 1.0)", value=1.00, step=0.01, format="%.2f")
-
-# Build map: keys (substrings) -> factor
-sector_adjust_map = {
-    "uti": fac_uti,
-    "emerg": fac_emg,
-    "enferm": fac_enf,
-    "aloj": 0.9  # example smaller factor for alojamento
-}
-
-# --------------------------
-# Analysis / Filters
-# --------------------------
-st.markdown("---")
-st.subheader("Dashboard Interativo")
-
+# Safety: stop if nothing
 if base_df is None or base_df.empty:
-    st.info("Ainda não há dados. Carregue um arquivo ou insira algumas linhas.")
+    st.markdown('<div style="padding:12px;background:#FEF3C7;border-left:4px solid #F59E0B;border-radius:8px;">⚠️ Nenhum dado disponível para análise. Faça upload no menu lateral ou salve um snapshot.</div>', unsafe_allow_html=True)
     st.stop()
 
-# Prepare canonical df
-df = prepare_dataframe(base_df)
-# Compute metrics (columns: Escalas_por_Paciente, Fator_Ajuste, Mediana_Ajustada)
-df = compute_metrics(df, sector_adjust_map)
+# Compute metrics (aplica fatores)
+df = compute_metrics(base_df, sector_adjust_map)
 
-# Filter selectors
-months = sorted(df['Mês'].dropna().unique())
-sectors = sorted(df['Setor'].dropna().unique())
+# --------------------------
+# Dashboard filters (reactive)
+# --------------------------
+st.markdown('<div class="section-title">📈 Dashboard Interativo</div>', unsafe_allow_html=True)
+col1, col2, col3 = st.columns([2,2,1])
+with col1:
+    months = ["Todos"] + sorted(df["Mes"].dropna().unique().tolist()) if "Mes" in df.columns else ["Todos"]
+    sel_month = st.selectbox("📅 Mês", months, key="sel_month")
+with col2:
+    sectors = sorted(df["Setor"].dropna().unique().tolist()) if "Setor" in df.columns else []
+    sel_sector = st.selectbox("🏥 Setor", sectors, key="sel_sector") if sectors else st.text_input("🏥 Setor", value="")
+with col3:
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("💾 Gerar snapshot temporário (sessão)"):
+        st.session_state["temp_snapshot_time"] = datetime.now().isoformat(timespec="seconds")
+        st.success("Snapshot temporário criado na sessão.")
 
-left, right = st.columns([3,1])
-with left:
-    sel_month = st.selectbox("Selecione Mês", months)
-    sel_sector = st.selectbox("Selecione Setor", sectors)
-with right:
-    st.markdown("### Ações rápidas")
-    if st.button("Salvar snapshot atual (sobrescrever persisted)"):
-        persist_df(df[['Mês','Setor','Tipo_Internacao','Escala','Qtd_Escalas','Qtd_Pacientes']])
-        st.success("Snapshot salvo em data_store.csv")
+# Apply filters
+if sel_month == "Todos":
+    subset = df[df["Setor"] == sel_sector].copy() if sel_sector else df.copy()
+    periodo_txt = "Todos os Meses"
+else:
+    subset = df[(df["Mes"] == sel_month) & (df["Setor"] == sel_sector)].copy()
+    periodo_txt = sel_month
 
-# Subset
-subset = df[(df['Mês'] == sel_month) & (df['Setor'] == sel_sector)].copy()
 if subset.empty:
-    st.warning("Não há linhas para o filtro selecionado.")
+    st.markdown('<div class="info-box">ℹ️ Sem dados para os filtros selecionados.</div>', unsafe_allow_html=True)
     st.stop()
 
-# Group by Escala: in many cases there is 1 row per escala; aggregate to be safe
-group = subset.groupby(['Escala','Tipo_Internacao']).agg({
-    'Qtd_Escalas':'sum',
-    'Qtd_Pacientes':'sum',
-    'Escalas_por_Paciente': 'median',  # median across possible duplicates
-    'Fator_Ajuste': 'median'
-}).reset_index()
-group['Mediana_Ajustada'] = (group['Escalas_por_Paciente'] * group['Fator_Ajuste']).round(2)
+if "Tipo_Escala" not in subset.columns:
+    st.error("Coluna 'Tipo_Escala' ausente. Verifique o arquivo de entrada.")
+    st.stop()
 
-# Reference bands fixed (these will be shown as horizontal polygons across radar axes)
-referencias = {
-    "Curta (1–3d)": 2,     # você pode ajustar se necessário
-    "Média (4–10d)": 4.5,
-    "Longa (>10d)": 8
-}
+# Aggregate for dashboard display (consistent)
+group = aggregate_for_dashboard(subset)
 
-# Choose visualization: radar if >= 3 escalas, else bars
-escalas = group['Escala'].tolist()
-medianas = group['Mediana_Ajustada'].tolist()
-pacientes = group['Qtd_Pacientes'].tolist()
+# Reactive visual card
+visual = st.empty()
+visual.markdown(f'<div class="success-box"><b>📊 Visualizando:</b> {periodo_txt} — {sel_sector}</div>', unsafe_allow_html=True)
 
-st.markdown(f"### {sel_month} — {sel_sector}")
-if len(escalas) >= 3:
-    radar_fig = make_radar_figure(escalas, medianas, referencias, title=f"{sel_month} — {sel_sector} | Radar de Mediana Ajustada")
+# Charts
+escalas = group["Tipo_Escala"].tolist()
+medianas = group["Mediana_Ajustada"].tolist()
+pacientes = group["Qtd_Pacientes"].tolist()
+medias_por_paciente = group["Escalas_por_Paciente"].tolist()
+
+radar_fig = None
+if len(escalas) >= 4:
+    referencia_vals = {k: v["ref"] for k,v in REFERENCIAS_TEXT.items()}
+    radar_fig = make_radar_figure(escalas, medianas, referencia_vals)
     st.plotly_chart(radar_fig, use_container_width=True)
 else:
-    st.info("Poucas escalas — mostrando gráfico de barras comparativo no lugar do radar.")
-    bar_fig = make_bar_patients_chart(escalas, pacientes, title=f"{sel_month} — {sel_sector} | Pacientes por Escala")
-    st.plotly_chart(bar_fig, use_container_width=True)
+    st.markdown('<div class="info-box">ℹ️ Poucas escalas para radar. Exibindo complementos gráficos.</div>', unsafe_allow_html=True)
 
-# Always show the bar patients chart as complement
-st.markdown("#### Complemento — Pacientes avaliados por escala")
-bar_fig2 = make_bar_patients_chart(escalas, pacientes, title="Pacientes avaliados por escala")
-st.plotly_chart(bar_fig2, use_container_width=True)
+st.markdown("<br>", unsafe_allow_html=True)
+bar_mean_fig = make_bar_mean_chart(escalas, medias_por_paciente, title=f"Média de Escalas por Paciente — {periodo_txt} / {sel_sector}")
+st.plotly_chart(bar_mean_fig, use_container_width=True)
 
-# --------------------------
-# Fixed reference table below graphs (user requested)
-# --------------------------
-st.markdown("---")
-st.markdown("## Referências e parâmetros utilizados (fixos)")
-st.markdown("""
-**Parâmetros de referência por tipo de internação (faixas usadas no radar):**
+if st.checkbox("Mostrar número absoluto de pacientes por escala", value=False):
+    fig_p = go.Figure()
+    fig_p.add_trace(go.Bar(x=escalas, y=pacientes, text=[str(int(x)) for x in pacientes], textposition="outside"))
+    fig_p.update_layout(title=f"Pacientes por Escala — {periodo_txt} / {sel_sector}", height=420)
+    st.plotly_chart(fig_p, use_container_width=True)
 
-- **Curta (1–3 dias):** 1–2 avaliações por paciente — *valor de referência plotado: 2*.  
-  *Fonte:* Protocolos institucionais de enfermagem; recomendações hospitalares (ex: avaliação admissional + reavaliação).
-- **Média (4–10 dias):** 3–5 avaliações por paciente — *valor de referência plotado: 4.5*.  
-  *Fonte:* Boas práticas de monitoramento e reavaliação periódica (Ministério da Saúde / protocolos hospitalares).
-- **Longa (>10 dias):** 6–10+ avaliações por paciente — *valor de referência plotado: 8*.  
-  *Fonte:* Diretrizes para pacientes de longa permanência / UTI (ANVISA / protocolos especializados).
+# Metrics
+st.markdown('<div class="section-title">📊 Métricas Resumidas</div>', unsafe_allow_html=True)
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("📋 Total Escalas", f"{int(group['Qtd_Escalas'].sum())}")
+rep_pat = int(group['Qtd_Pacientes'].max()) if not group.empty else 0
+c2.metric("👥 Pacientes (representativo)", f"{rep_pat}")
+c3.metric("📈 Média Geral", f"{group['Escalas_por_Paciente'].mean():.2f}" if not group.empty else "0.00")
+c4.metric("⚖️ Média Ajustada", f"{group['Mediana_Ajustada'].mean():.2f}" if not group.empty else "0.00")
 
-**Mediana Ajustada:** calculada como `round(median(Escalas por Paciente) * Fator de Ajuste Setorial)`.  
-- Fatores de ajuste aplicados por padrão (configuráveis no painel):  
-  - UTI: **1.20**  
-  - Emergência: **1.15**  
-  - Enfermaria geral: **1.00**  
-  - Alojamento: **0.90** (exemplo)
+# Data details (hidden)
+with st.expander("📚 Dados Detalhados", expanded=False):
+    st.latex(r"\text{Mediana Ajustada} = \left(\frac{\text{Qtd Escalas}}{\text{Qtd Pacientes}}\right) \times \text{Fator}")
+    debug_df = group.copy()
+    debug_df["Passo a Passo"] = debug_df.apply(lambda r: f"({int(r['Qtd_Escalas'])} ÷ {int(r['Qtd_Pacientes'])}) × {r['Fator_Ajuste']:.2f} = {r['Mediana_Ajustada']:.2f}", axis=1)
+    st.dataframe(debug_df[["Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Escalas_por_Paciente","Fator_Ajuste","Mediana_Ajustada","Passo a Passo"]], use_container_width=True)
 
-**Observação metodológica:**  
-- Se você fornecer dados em nível de paciente (cada linha = avaliação de escala por paciente), o app poderá calcular a mediana **verdadeira** por paciente; caso você forneça apenas os agregados por escala (como Qtd_Escalas e Qtd_Pacientes), o app estima `Escalas_por_Paciente = Qtd_Escalas / Qtd_Pacientes` e então aplica a mediana e fator de ajuste sobre essas estimativas.  
-- As referências são baseadas em literatura e protocolos institucionais (Ministério da Saúde, ANVISA, protocolos hospitalares). Caso queira, posso anexar arquivos PDF das referências ou links diretos no rodapé do relatório.
+# References open
+with st.expander("📖 Referências Metodológicas (aberto)", expanded=True):
+    st.markdown(f"""
+- **Curta (1–3d):** 1–2 avaliações — ref: {REFERENCIAS_TEXT['Curta']['ref']}  
+  Contexto: internações rápidas.
+- **Média (4–10d):** 3–5 avaliações — ref: {REFERENCIAS_TEXT['Média']['ref']}  
+- **Longa (>10d):** 6–10+ avaliações — ref: {REFERENCIAS_TEXT['Longa']['ref']}  
 """)
 
-# Show the actual table of values used to produce the plots (fixed below graphs)
-st.markdown("### Tabela de cálculo — valores usados no painel")
-table_display = group[['Escala','Qtd_Escalas','Qtd_Pacientes','Escalas_por_Paciente','Fator_Ajuste','Mediana_Ajustada']].copy()
-table_display['Escalas_por_Paciente'] = table_display['Escalas_por_Paciente'].round(2)
-st.dataframe(table_display)
+# Benchmarks interpretation
+st.markdown('<div class="section-title">🚦 Interpretação Rápida (benchmarks)</div>', unsafe_allow_html=True)
+for _, r in group.iterrows():
+    val = r["Mediana_Ajustada"]
+    if val <= REFERENCIAS_TEXT["Curta"]["ref"]:
+        badge, phrase = "🟢", "Dentro do esperado (Curta)."
+    elif val <= REFERENCIAS_TEXT["Média"]["ref"]:
+        badge, phrase = "🟡", "Faixa média — avaliar protocolos."
+    elif val <= REFERENCIAS_TEXT["Longa"]["ref"]:
+        badge, phrase = "🟠", "Tendência para internação longa; investigar."
+    else:
+        badge, phrase = "🔴", "Acima da referência — investigação necessária."
+    st.write(f"{badge} **{r['Tipo_Escala']}** — {val:.2f} — {phrase}")
 
-# --------------------------
-# Export / Download: data + PDF
-# --------------------------
-st.markdown("---")
-st.markdown("## Exportar / Baixar")
-colx, coly = st.columns(2)
-with colx:
-    st.markdown("### Dados")
-    st.markdown(download_link_df(df[['Mês','Setor','Tipo_Internacao','Escala','Qtd_Escalas','Qtd_Pacientes']].round(2), name=f"dados_{sel_month}_{sel_sector}.csv"), unsafe_allow_html=True)
-with coly:
-    st.markdown("### Relatório PDF (opcional)")
-    if not KALEIDO_AVAILABLE or not REPORTLAB_AVAILABLE:
-        st.warning("Exportar PDF requer 'kaleido' e 'reportlab' instalados (pip install kaleido reportlab).")
-    if st.button("Gerar PDF do painel (figuras)"):
-        # choose figures to export
-        figs = []
-        if len(escalas) >= 3:
-            figs.append(radar_fig)
-        else:
-            figs.append(bar_fig)
-        figs.append(bar_fig2)
-        pdf_bytes, err = try_export_pdf(figs, title=f"Relatório - {sel_month} - {sel_sector}")
-        if pdf_bytes:
-            st.success("PDF gerado.")
-            st.download_button("⬇️ Baixar PDF", data=pdf_bytes, file_name=f"relatorio_{sel_month}_{sel_sector}.pdf", mime="application/pdf")
-        else:
-            st.error(err or "Erro ao gerar PDF.")
+# Export current analysis
+st.markdown('<div class="section-title">📥 Exportar Dados da Análise</div>', unsafe_allow_html=True)
+ex1, ex2 = st.columns(2)
+with ex1:
+    export_df = df[["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes","Escalas_por_Paciente","Fator_Ajuste","Mediana_Ajustada"]].round(2)
+    st.markdown(download_link_df(export_df, name=f"escalas_analise_{sel_sector}_{periodo_txt}.csv".replace(' ','_')), unsafe_allow_html=True)
+with ex2:
+    st.info("Exportar histórico disponível no sidebar.")
+
+# Temporal if available
+if "Mes" in df.columns and df["Mes"].nunique() > 1:
+    st.markdown('<div class="section-title">📅 Análise Temporal</div>', unsafe_allow_html=True)
+    temp = df[df["Setor"] == sel_sector].groupby(["Mes","Tipo_Escala"]).agg(Qtd_Escalas=("Qtd_Escalas","sum"), Qtd_Pacientes=("Qtd_Pacientes","max")).reset_index()
+    temp["Escalas_por_Paciente"] = temp.apply(lambda r: round(r["Qtd_Escalas"]/r["Qtd_Pacientes"],2) if r["Qtd_Pacientes"]>0 else 0.0, axis=1)
+    figt = go.Figure()
+    for escala in temp["Tipo_Escala"].unique():
+        d = temp[temp["Tipo_Escala"]==escala].sort_values("Mes")
+        figt.add_trace(go.Scatter(x=d["Mes"], y=d["Escalas_por_Paciente"], mode="lines+markers", name=escala))
+    figt.update_layout(title=f"Evolução Temporal — {sel_sector}", xaxis_title="Mês", yaxis_title="Escalas por Paciente", height=420)
+    st.plotly_chart(figt, use_container_width=True)
 
 st.markdown("---")
-st.caption("App desenvolvido para análise institucional — ASELC / HGP.")
+st.markdown("""
+"<div style='text-align:center;color:#6B7280;padding:8px;'>" 
+     <p style='margin:0;font-size:0.9rem;'>
+         <b>Sistema de Análise de Escalas de Avaliação</b><br>
+         ASELC / HGP — Desenvolvido para Gestão Hospitalar<br>
+         © 2025 
+    </p>
+</div>
+""", unsafe_allow_html=True)
