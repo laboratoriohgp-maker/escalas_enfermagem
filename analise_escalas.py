@@ -1,28 +1,17 @@
-# app_escalas_profissional_refactor_v10.py
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import plotly.io as pio
 from pathlib import Path
 from PIL import Image
 import io
 import base64
+import os
+import json
+import requests
 from datetime import datetime
 import uuid
-
-# Optional PDF generation imports
-try:
-    import plotly.io as pio
-    KALEIDO_AVAILABLE = True
-except Exception:
-    KALEIDO_AVAILABLE = False
-
-try:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.pdfgen import canvas
-    REPORTLAB_AVAILABLE = True
-except Exception:
-    REPORTLAB_AVAILABLE = False
 
 # --------------------------
 # Config / constantes
@@ -35,10 +24,13 @@ HGP_YELLOW = "#E5B900"
 TEXT_PRIMARY = "#1F2937"
 ACCENT_COLOR = "#3B82F6"
 
-DATA_STORE = Path("data_store.csv")            # legacy
-HISTORY_STORE = Path("history_store.csv")     # index of snapshots
-HISTORY_DIR = Path("history_snapshots")       # folder with snapshot files
-HISTORY_DIR.mkdir(exist_ok=True)
+DATA_STORE = Path("data_store.csv")
+HISTORY_STORE = Path("history_store.csv")  # registra publicações (gists ou uploads)
+HISTORY_SNAP_DIR = Path("history_snapshots")
+HISTORY_SNAP_DIR.mkdir(exist_ok=True)
+
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")  # se presente habilita publicar como gist
+GIST_API = "https://api.github.com/gists"
 
 REFERENCIAS_TEXT = {
     "Curta": {"ref": 2.0, "desc": "Curta (1–3d): 1–2 avaliações — compatível com internações de curta duração."},
@@ -47,13 +39,13 @@ REFERENCIAS_TEXT = {
 }
 
 # --------------------------
-# Estilos
+# CSS / header
 # --------------------------
 st.markdown(f"""
 <style>
 .stApp {{ background: linear-gradient(135deg, #F5F7FA 0%, #EEF2F6 100%); }}
-.main-header {{ background: linear-gradient(135deg, {HGP_YELLOW} 0%, #FFE6A7 100%); padding: 2.0rem 1.2rem; border-radius: 12px; display:flex; align-items:center; justify-content:space-between; gap:1rem; margin-bottom:2rem; }}
-.main-title {{ color: {ASELC_BLUE}; font-size:2.2rem; font-weight:900; margin:0; }}
+.main-header {{ background: linear-gradient(135deg, {HGP_YELLOW} 0%, #FFE6A7 100%); padding: 1.8rem 1.2rem; border-radius: 12px; display:flex; align-items:center; justify-content:space-between; gap:1rem; margin-bottom:2rem; }}
+.main-title {{ color: {ASELC_BLUE}; font-size:2.0rem; font-weight:900; margin:0; }}
 .main-sub {{ color: {ASELC_BLUE}; margin-top:0.4rem; }}
 .success-box {{ background:#D1FAE5; border-left:4px solid #10B981; padding:10px; border-radius:8px; margin:8px 0; }}
 .section-title {{ font-weight:700; margin-top:12px; margin-bottom:6px; color:{TEXT_PRIMARY}; }}
@@ -62,7 +54,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # --------------------------
-# Helpers
+# Helpers (data, plotting, sharing)
 # --------------------------
 def load_local_logos():
     logos = {}
@@ -73,13 +65,6 @@ def load_local_logos():
         try: logos["hgp"] = Image.open("logo_hgp.png")
         except: pass
     return logos
-
-def safe_read_excel(uploaded_file):
-    try:
-        return pd.read_excel(uploaded_file)
-    except Exception as e:
-        st.error(f"Erro ao ler Excel: {e}")
-        return None
 
 def normalize_col_name(name: str) -> str:
     s = str(name).strip().lower()
@@ -94,7 +79,7 @@ def prepare_dataframe(df):
     mapping = {}
     for c in ["setor","sector","unidade","department"]:
         if c in df.columns: mapping[c] = "Setor"; break
-    for c in ["tipo_de_escala","tipo_escala","escala","tipodeescala"]:
+    for c in ["tipo_de_escala","tipo_escala","escala","tipodeescala","tipo_internacao"]:
         if c in df.columns: mapping[c] = "Tipo_Escala"; break
     for c in ["quantidade_de_escalas","qtd_escalas","escalas","quantidadeescalas"]:
         if c in df.columns: mapping[c] = "Qtd_Escalas"; break
@@ -106,7 +91,6 @@ def prepare_dataframe(df):
     expected = ["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"]
     missing = [c for c in expected if c not in df.columns]
     if missing:
-        st.warning(f"Colunas faltando: {', '.join(missing)}. Retornando DataFrame padronizado vazio.")
         return pd.DataFrame(columns=expected)
     df = df[expected].copy()
     df["Setor"] = df["Setor"].astype(str).str.strip().str.title()
@@ -140,73 +124,6 @@ def aggregate_for_dashboard(df_subset):
     grp["Mediana_Ajustada"] = (grp["Escalas_por_Paciente"] * grp["Fator_Ajuste"]).round(2)
     return grp
 
-def save_history_snapshot(df_snapshot, source_name="uploaded"):
-    now = datetime.now().isoformat(timespec="seconds")
-    snap_id = str(uuid.uuid4())[:8]
-    meta = {"snapshot_id": snap_id, "timestamp": now, "source": source_name, "n_rows": len(df_snapshot)}
-    hist_df = pd.DataFrame([meta])
-    if HISTORY_STORE.exists():
-        try:
-            prev = pd.read_csv(HISTORY_STORE)
-            hist_df = pd.concat([prev, hist_df], ignore_index=True)
-        except Exception:
-            pass
-    hist_df.to_csv(HISTORY_STORE, index=False)
-    fname = HISTORY_DIR / f"history_snapshot_{snap_id}.csv"
-    df_snapshot.to_csv(fname, index=False)
-    return snap_id, fname.name
-
-def load_history_index():
-    if HISTORY_STORE.exists():
-        try:
-            return pd.read_csv(HISTORY_STORE)
-        except Exception:
-            return pd.DataFrame(columns=["snapshot_id","timestamp","source","n_rows"])
-    return pd.DataFrame(columns=["snapshot_id","timestamp","source","n_rows"])
-
-def delete_history_snapshots(ids):
-    idx = load_history_index()
-    if idx.empty: return 0
-    to_keep = idx[~idx["snapshot_id"].isin(ids)]
-    to_delete = idx[idx["snapshot_id"].isin(ids)]
-    # delete files
-    deleted = 0
-    for sid in to_delete["snapshot_id"].tolist():
-        f = HISTORY_DIR / f"history_snapshot_{sid}.csv"
-        try:
-            if f.exists(): f.unlink(); deleted += 1
-        except Exception:
-            pass
-    to_keep.to_csv(HISTORY_STORE, index=False)
-    return deleted
-
-def load_snapshot_df(snapshot_id):
-    f = HISTORY_DIR / f"history_snapshot_{snapshot_id}.csv"
-    if f.exists():
-        try:
-            df = pd.read_csv(f)
-            df = prepare_dataframe(df) if not df.empty else df
-            return df
-        except Exception:
-            return pd.DataFrame(columns=["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"])
-    return pd.DataFrame(columns=["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"])
-
-def df_to_download_bytes(df, fmt="csv"):
-    if fmt == "csv":
-        return df.to_csv(index=False).encode("utf-8"), "text/csv"
-    else:
-        towrite = io.BytesIO()
-        with pd.ExcelWriter(towrite, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False)
-        return towrite.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-
-def download_link_df(df, name="export.csv"):
-    bts, mime = df_to_download_bytes(df, "csv")
-    b64 = base64.b64encode(bts).decode()
-    href = f'<a href="data:file/csv;base64,{b64}" download="{name}" style="text-decoration:none;background:{ACCENT_COLOR};color:white;padding:6px 10px;border-radius:6px;font-weight:700;">⬇️ Baixar CSV</a>'
-    return href
-
-# Plot helpers
 def make_radar_figure(escalas, valores_real, referencia_vals):
     fig = go.Figure()
     theta = escalas + ([escalas[0]] if escalas else [])
@@ -229,7 +146,63 @@ def make_bar_mean_chart(escalas, medias, title):
     return fig
 
 # --------------------------
-# UI Header
+# Sharing / Gist helpers
+# --------------------------
+def make_standalone_html(df, plots, title="Relatório", meta=None, include_plotlyjs="cdn"):
+    meta = meta or {}
+    now = datetime.now().isoformat(timespec="seconds")
+    head = f"<meta charset='utf-8'><title>{title}</title>"
+    head += "<style>body{font-family:Arial,Helvetica,sans-serif;padding:18px;} h1{color:#2A327A;} .meta{color:#555;margin-bottom:12px;} table{border-collapse:collapse;width:100%;} table th, table td{border:1px solid #ddd;padding:6px;}</style>"
+    header = f"<h1>{title}</h1><div class='meta'>Gerado: {now}"
+    for k,v in meta.items(): header += f" | {k}: {v}"
+    header += "</div>"
+    table_html = df.to_html(index=False, classes='table', border=0)
+    plots_html = ""
+    for fig in plots:
+        if fig is None: continue
+        plots_html += pio.to_html(fig, full_html=False, include_plotlyjs=include_plotlyjs)
+    html = f"<!doctype html><html><head>{head}</head><body>{header}{table_html}{plots_html}</body></html>"
+    return html.encode("utf-8")
+
+def create_gist_from_html(html_bytes, filename="relatorio.html", public=True, description="Relatório gerado"):
+    if not GITHUB_TOKEN:
+        raise RuntimeError("GITHUB_TOKEN não definido")
+    headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
+    payload = {"description": description, "public": public, "files": {filename: {"content": html_bytes.decode("utf-8")}}}
+    resp = requests.post(GIST_API, headers=headers, data=json.dumps(payload), timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+def register_share_record(gist_id, raw_url, filename, public=True, source="gist"):
+    now = datetime.now().isoformat(timespec="seconds")
+    rec = {"share_id": gist_id, "raw_url": raw_url, "filename": filename, "timestamp": now, "public": public, "source": source}
+    if HISTORY_STORE.exists():
+        try:
+            df = pd.read_csv(HISTORY_STORE)
+            df = pd.concat([df, pd.DataFrame([rec])], ignore_index=True)
+        except Exception:
+            df = pd.DataFrame([rec])
+    else:
+        df = pd.DataFrame([rec])
+    df.to_csv(HISTORY_STORE, index=False)
+
+def load_share_index():
+    if HISTORY_STORE.exists():
+        try:
+            return pd.read_csv(HISTORY_STORE).sort_values("timestamp", ascending=False).reset_index(drop=True)
+        except Exception:
+            return pd.DataFrame(columns=["share_id","raw_url","filename","timestamp","public","source"])
+    return pd.DataFrame(columns=["share_id","raw_url","filename","timestamp","public","source"])
+
+def delete_gist_by_id(gist_id):
+    if not GITHUB_TOKEN:
+        raise RuntimeError("GITHUB_TOKEN não definido")
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+    resp = requests.delete(f"{GIST_API}/{gist_id}", headers=headers, timeout=30)
+    return resp.status_code == 204
+
+# --------------------------
+# Build UI header with logos
 # --------------------------
 logos = load_local_logos()
 left_html = right_html = ""
@@ -242,7 +215,7 @@ st.markdown(f"""
 <div class="main-header">
   <div style="width:160px;text-align:left">{f"<img src='data:image/png;base64,{left_html}' style='max-width:140px;height:auto;'/>" if left_html else ""}</div>
   <div style="text-align:center;">
-    <div class="main-title">📊 Painel de Escalas por Paciente</div>
+    <div class="main-title">Painel de Escalas por Paciente</div>
     <div class="main-sub">Análise comparativa de avaliações — ASELC / HGP</div>
   </div>
   <div style="width:160px;text-align:right">{f"<img src='data:image/png;base64,{right_html}' style='max-width:140px;height:auto;'/>" if right_html else ""}</div>
@@ -250,7 +223,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # --------------------------
-# Sidebar: upload, histórico com seleção e exclusão
+# Sidebar (upload, history of shares, options)
 # --------------------------
 with st.sidebar:
     st.markdown("### ⚙️ Configurações e Histórico")
@@ -258,49 +231,31 @@ with st.sidebar:
     uploaded = st.file_uploader("Envie Excel ou CSV", type=["xlsx","xls","csv"], key="uploader")
 
     st.markdown("---")
-    st.markdown("**Histórico salvo (snapshots)**")
-    hist_index = load_history_index()
-    if not hist_index.empty:
-        hist_index_sorted = hist_index.sort_values("timestamp", ascending=False).reset_index(drop=True)
-        st.dataframe(hist_index_sorted, use_container_width=True)
-        # multi-select for analysis
-        sel_ids = st.multiselect("Selecione 1 ou mais snapshots para análise", options=hist_index_sorted["snapshot_id"].tolist(), default=[], help="Ao selecionar, apenas os snapshots escolhidos serão usados na análise quando 'Usar snapshots selecionados' for clicado.")
-        col1, col2 = st.columns([1,1])
-        with col1:
-            if st.button("🗑️ Apagar snapshots selecionados"):
-                if not sel_ids:
-                    st.warning("Nenhum snapshot selecionado para apagar.")
-                else:
-                    deleted = delete_history_snapshots(sel_ids)
-                    st.success(f"{deleted} snapshots apagados.")
-                    st.experimental_rerun()
-        with col2:
-            if st.button("✅ Usar snapshots selecionados na análise"):
-                if not sel_ids:
-                    st.warning("Selecione ao menos um snapshot para usar.")
-                else:
-                    st.session_state["use_snapshots_ids"] = sel_ids
-                    st.success(f"{len(sel_ids)} snapshots marcados para uso na análise atual.")
+    st.markdown("**Compartilhamentos**")
+    shares_df = load_share_index()
+    if not shares_df.empty:
+        st.dataframe(shares_df[["timestamp","filename","raw_url","public","source"]], use_container_width=True)
+        sel_share_row = st.selectbox("Selecionar compartilhamento para ações", options=shares_df.index.tolist(), format_func=lambda i: f"{shares_df.at[i,'timestamp']} — {shares_df.at[i,'filename']}")
+        if sel_share_row is not None:
+            rec = shares_df.loc[sel_share_row]
+            st.write("Link:", rec.get("raw_url"))
+            if GITHUB_TOKEN and st.button("🗑️ Apagar Gist selecionado"):
+                gid = rec.get("share_id")
+                try:
+                    ok = delete_gist_by_id(gid)
+                    if ok:
+                        # remove from history file
+                        new_df = shares_df[shares_df["share_id"] != gid]
+                        new_df.to_csv(HISTORY_STORE, index=False)
+                        st.success("Gist apagado e histórico atualizado.")
+                        st.experimental_rerun()
+                    else:
+                        st.error("Falha ao apagar o gist (verifique token/permissões).")
+                except Exception as e:
+                    st.error(f"Erro ao apagar gist: {e}")
     else:
-        st.info("Nenhum snapshot salvo ainda.")
+        st.info("Nenhum compartilhamento registrado ainda.")
 
-    st.markdown("---")
-    st.markdown("**Salvar histórico (snapshot)**")
-    hist_source = st.text_input("Fonte (nome do arquivo ou descrição)", value="uploaded", help="Nome do arquivo ou descrição do snapshot")
-    if st.button("💾 Salvar histórico (snapshot)"):
-        # use uploaded session df if present
-        if "df_uploaded_session" in st.session_state and st.session_state["df_uploaded_session"] is not None:
-            snap_df = st.session_state["df_uploaded_session"].copy()
-            snap_id, fname = save_history_snapshot(snap_df, source_name=hist_source or "uploaded")
-            st.success(f"Snapshot salvo: {snap_id}")
-            st.experimental_rerun()
-        else:
-            st.error("Nenhum dado preparado na sessão. Faça upload antes de salvar snapshot.")
-
-    st.markdown("---")
-    st.markdown("**Opções**")
-    include_history_all = st.checkbox("Incluir todo histórico salvo na análise (cuidado: pode duplicar dados)", value=False)
-    st.markdown("Observação: uploads não salvam automaticamente; use 'Salvar histórico' para registrar um snapshot.")
     st.markdown("---")
     st.markdown("**Fatores de Ajuste**")
     fac_uti = st.number_input("UTI", value=1.20, step=0.01, format="%.2f")
@@ -309,11 +264,14 @@ with st.sidebar:
     fac_amb = st.number_input("Ambulatório", value=1.00, step=0.01, format="%.2f")
 
 # --------------------------
-# Prepare session uploaded data (do not auto-save)
+# Prepare session uploaded data
 # --------------------------
 if uploaded is not None:
     try:
-        raw = pd.read_csv(uploaded) if str(uploaded.name).lower().endswith(".csv") else safe_read_excel(uploaded)
+        if str(uploaded.name).lower().endswith(".csv"):
+            raw = pd.read_csv(uploaded)
+        else:
+            raw = pd.read_excel(uploaded)
     except Exception as e:
         raw = None
         st.sidebar.error(f"Erro ao ler arquivo: {e}")
@@ -324,17 +282,16 @@ if uploaded is not None:
             st.session_state["df_uploaded_session"] = None
         else:
             st.session_state["df_uploaded_session"] = df_uploaded
-            st.sidebar.success(f"{len(df_uploaded)} linhas preparadas na sessão (não salvas). Para salvar clique em 'Salvar histórico'.")
+            st.sidebar.success(f"{len(df_uploaded)} linhas preparadas na sessão (não salvas). Use 'Salvar histórico' para registrar snapshot se quiser.")
 else:
     if "df_uploaded_session" not in st.session_state:
         st.session_state["df_uploaded_session"] = None
 
 # --------------------------
-# Build analysis base_df according to user choices
+# Build base_df (session upload preferred)
 # --------------------------
 sector_adjust_map = {"uti": fac_uti, "emerg": fac_emg, "enferm": fac_enf, "ambulatorio": fac_amb, "aloj": 0.9}
 
-# Start with session uploaded if exists, else fallback to data_store
 if st.session_state.get("df_uploaded_session") is not None and not st.session_state["df_uploaded_session"].empty:
     base_df = st.session_state["df_uploaded_session"].copy()
 else:
@@ -347,33 +304,14 @@ else:
     else:
         base_df = pd.DataFrame(columns=["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"])
 
-# Option: include either all history, or only selected snapshots, or none
-snap_ids_to_include = []
-if "use_snapshots_ids" in st.session_state and st.session_state["use_snapshots_ids"]:
-    snap_ids_to_include = st.session_state["use_snapshots_ids"]
-elif include_history_all and not load_history_index().empty:
-    snap_ids_to_include = load_history_index()["snapshot_id"].tolist()
-
-# Load selected snapshots
-snap_frames = []
-for sid in snap_ids_to_include:
-    sdf = load_snapshot_df(sid)
-    if not sdf.empty:
-        snap_frames.append(sdf)
-if snap_frames:
-    snap_concat = pd.concat(snap_frames, ignore_index=True)
-    base_df = pd.concat([base_df, snap_concat], ignore_index=True)
-
-# Safety: stop if nothing
 if base_df is None or base_df.empty:
-    st.markdown('<div style="padding:12px;background:#FEF3C7;border-left:4px solid #F59E0B;border-radius:8px;">⚠️ Nenhum dado disponível para análise. Faça upload no menu lateral ou salve um snapshot.</div>', unsafe_allow_html=True)
+    st.markdown('<div style="padding:12px;background:#FEF3C7;border-left:4px solid #F59E0B;border-radius:8px;">⚠️ Nenhum dado disponível para análise. Faça upload no menu lateral ou insira manualmente.</div>', unsafe_allow_html=True)
     st.stop()
 
-# Compute metrics (aplica fatores)
 df = compute_metrics(base_df, sector_adjust_map)
 
 # --------------------------
-# Dashboard filters (reactive)
+# Dashboard filters
 # --------------------------
 st.markdown('<div class="section-title">📈 Dashboard Interativo</div>', unsafe_allow_html=True)
 col1, col2, col3 = st.columns([2,2,1])
@@ -387,9 +325,8 @@ with col3:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("💾 Gerar snapshot temporário (sessão)"):
         st.session_state["temp_snapshot_time"] = datetime.now().isoformat(timespec="seconds")
-        st.success("Snapshot temporário criado na sessão.")
+        st.success("Snapshot temporário gerado na sessão.")
 
-# Apply filters
 if sel_month == "Todos":
     subset = df[df["Setor"] == sel_sector].copy() if sel_sector else df.copy()
     periodo_txt = "Todos os Meses"
@@ -405,21 +342,20 @@ if "Tipo_Escala" not in subset.columns:
     st.error("Coluna 'Tipo_Escala' ausente. Verifique o arquivo de entrada.")
     st.stop()
 
-# Aggregate for dashboard display (consistent)
 group = aggregate_for_dashboard(subset)
 
-# Reactive visual card
+# reactive visual card
 visual = st.empty()
 visual.markdown(f'<div class="success-box"><b>📊 Visualizando:</b> {periodo_txt} — {sel_sector}</div>', unsafe_allow_html=True)
 
-# Charts
+# charts
 escalas = group["Tipo_Escala"].tolist()
 medianas = group["Mediana_Ajustada"].tolist()
 pacientes = group["Qtd_Pacientes"].tolist()
 medias_por_paciente = group["Escalas_por_Paciente"].tolist()
 
 radar_fig = None
-if len(escalas) >= 4:
+if len(escalas) >= 3:
     referencia_vals = {k: v["ref"] for k,v in REFERENCIAS_TEXT.items()}
     radar_fig = make_radar_figure(escalas, medianas, referencia_vals)
     st.plotly_chart(radar_fig, use_container_width=True)
@@ -430,74 +366,69 @@ st.markdown("<br>", unsafe_allow_html=True)
 bar_mean_fig = make_bar_mean_chart(escalas, medias_por_paciente, title=f"Média de Escalas por Paciente — {periodo_txt} / {sel_sector}")
 st.plotly_chart(bar_mean_fig, use_container_width=True)
 
-if st.checkbox("Mostrar número absoluto de pacientes por escala", value=False):
-    fig_p = go.Figure()
-    fig_p.add_trace(go.Bar(x=escalas, y=pacientes, text=[str(int(x)) for x in pacientes], textposition="outside"))
-    fig_p.update_layout(title=f"Pacientes por Escala — {periodo_txt} / {sel_sector}", height=420)
-    st.plotly_chart(fig_p, use_container_width=True)
+# --------------------------
+# Share: generate HTML, download, publish gist
+# --------------------------
+st.markdown('<div class="section-title">📤 Compartilhar análise atual</div>', unsafe_allow_html=True)
 
-# Metrics
+export_df = df[["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes","Escalas_por_Paciente","Fator_Ajuste","Mediana_Ajustada"]].round(2)
+
+meta = {"Mês": periodo_txt, "Setor": sel_sector}
+html_bytes = make_standalone_html(df=export_df, plots=[radar_fig, bar_mean_fig], title=f"Relatório — {sel_sector} — {periodo_txt}", meta=meta, include_plotlyjs="cdn")
+
+c1, c2 = st.columns([1,1])
+with c1:
+    st.download_button("⬇️ Baixar página HTML", data=html_bytes, file_name=f"relatorio_{sel_sector}_{periodo_txt}.html".replace(" ","_"), mime="text/html")
+with c2:
+    if GITHUB_TOKEN:
+        if st.button("📤 Publicar como Gist (público)"):
+            try:
+                resp = create_gist_from_html(html_bytes, filename=f"relatorio_{sel_sector}_{periodo_txt}.html".replace(" ","_"), public=True, description=f"Relatório {sel_sector} {periodo_txt}")
+                files = resp.get("files", {})
+                first_file = list(files.keys())[0] if files else None
+                raw_url = files[first_file]["raw_url"] if first_file else resp.get("html_url")
+                gist_id = resp.get("id")
+                register_share_record(gist_id, raw_url, first_file or f"relatorio_{uuid.uuid4().hex[:6]}.html", public=True, source="gist")
+                st.success("Publicado como Gist com sucesso")
+                st.write(raw_url)
+            except Exception as e:
+                st.error(f"Erro ao publicar Gist: {e}")
+    else:
+        st.info("Publicar como Gist exige GITHUB_TOKEN no ambiente (configure para habilitar).")
+
+# --------------------------
+# Metrics and details
+# --------------------------
 st.markdown('<div class="section-title">📊 Métricas Resumidas</div>', unsafe_allow_html=True)
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("📋 Total Escalas", f"{int(group['Qtd_Escalas'].sum())}")
 rep_pat = int(group['Qtd_Pacientes'].max()) if not group.empty else 0
-c2.metric("👥 Pacientes (representativo)", f"{rep_pat}")
+c2.metric("👥 Pacientes", f"{rep_pat}")
 c3.metric("📈 Média Geral", f"{group['Escalas_por_Paciente'].mean():.2f}" if not group.empty else "0.00")
 c4.metric("⚖️ Média Ajustada", f"{group['Mediana_Ajustada'].mean():.2f}" if not group.empty else "0.00")
 
-# Data details (hidden)
 with st.expander("📚 Dados Detalhados", expanded=False):
     st.latex(r"\text{Mediana Ajustada} = \left(\frac{\text{Qtd Escalas}}{\text{Qtd Pacientes}}\right) \times \text{Fator}")
     debug_df = group.copy()
     debug_df["Passo a Passo"] = debug_df.apply(lambda r: f"({int(r['Qtd_Escalas'])} ÷ {int(r['Qtd_Pacientes'])}) × {r['Fator_Ajuste']:.2f} = {r['Mediana_Ajustada']:.2f}", axis=1)
     st.dataframe(debug_df[["Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Escalas_por_Paciente","Fator_Ajuste","Mediana_Ajustada","Passo a Passo"]], use_container_width=True)
 
-# References open
-with st.expander("📖 Referências Metodológicas (aberto)", expanded=True):
-    st.markdown(f"""
-- **Curta (1–3d):** 1–2 avaliações — ref: {REFERENCIAS_TEXT['Curta']['ref']}  
-  Contexto: internações rápidas.
-- **Média (4–10d):** 3–5 avaliações — ref: {REFERENCIAS_TEXT['Média']['ref']}  
-- **Longa (>10d):** 6–10+ avaliações — ref: {REFERENCIAS_TEXT['Longa']['ref']}  
-""")
-
-# Benchmarks interpretation
-st.markdown('<div class="section-title">🚦 Interpretação Rápida (benchmarks)</div>', unsafe_allow_html=True)
-for _, r in group.iterrows():
-    val = r["Mediana_Ajustada"]
-    if val <= REFERENCIAS_TEXT["Curta"]["ref"]:
-        badge, phrase = "🟢", "Dentro do esperado (Curta)."
-    elif val <= REFERENCIAS_TEXT["Média"]["ref"]:
-        badge, phrase = "🟡", "Faixa média — avaliar protocolos."
-    elif val <= REFERENCIAS_TEXT["Longa"]["ref"]:
-        badge, phrase = "🟠", "Tendência para internação longa; investigar."
-    else:
-        badge, phrase = "🔴", "Acima da referência — investigação necessária."
-    st.write(f"{badge} **{r['Tipo_Escala']}** — {val:.2f} — {phrase}")
-
-# Export current analysis
-st.markdown('<div class="section-title">📥 Exportar Dados da Análise</div>', unsafe_allow_html=True)
-ex1, ex2 = st.columns(2)
-with ex1:
-    export_df = df[["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes","Escalas_por_Paciente","Fator_Ajuste","Mediana_Ajustada"]].round(2)
-    st.markdown(download_link_df(export_df, name=f"escalas_analise_{sel_sector}_{periodo_txt}.csv".replace(' ','_')), unsafe_allow_html=True)
-with ex2:
-    st.info("Exportar histórico disponível no sidebar.")
-
-# Temporal if available
+# --------------------------
+# Temporal
+# --------------------------
 if "Mes" in df.columns and df["Mes"].nunique() > 1:
     st.markdown('<div class="section-title">📅 Análise Temporal</div>', unsafe_allow_html=True)
-    temp = df[df["Setor"] == sel_sector].groupby(["Mes","Tipo_Escala"]).agg(Qtd_Escalas=("Qtd_Escalas","sum"), Qtd_Pacientes=("Qtd_Pacientes","max")).reset_index()
-    temp["Escalas_por_Paciente"] = temp.apply(lambda r: round(r["Qtd_Escalas"]/r["Qtd_Pacientes"],2) if r["Qtd_Pacientes"]>0 else 0.0, axis=1)
-    figt = go.Figure()
-    for escala in temp["Tipo_Escala"].unique():
-        d = temp[temp["Tipo_Escala"]==escala].sort_values("Mes")
-        figt.add_trace(go.Scatter(x=d["Mes"], y=d["Escalas_por_Paciente"], mode="lines+markers", name=escala))
-    figt.update_layout(title=f"Evolução Temporal — {sel_sector}", xaxis_title="Mês", yaxis_title="Escalas por Paciente", height=420)
-    st.plotly_chart(figt, use_container_width=True)
+    temporal_data = df[df["Setor"] == sel_sector].groupby(["Mes","Tipo_Escala"]).agg(Qtd_Escalas=("Qtd_Escalas","sum"), Qtd_Pacientes=("Qtd_Pacientes","max")).reset_index()
+    temporal_data["Escalas_por_Paciente"] = temporal_data.apply(lambda r: round(r["Qtd_Escalas"]/r["Qtd_Pacientes"],2) if r["Qtd_Pacientes"]>0 else 0.0, axis=1)
+    fig_temporal = go.Figure()
+    for escala in temporal_data["Tipo_Escala"].unique():
+        d = temporal_data[temporal_data["Tipo_Escala"]==escala].sort_values("Mes")
+        fig_temporal.add_trace(go.Scatter(x=d["Mes"], y=d["Escalas_por_Paciente"], mode="lines+markers", name=escala))
+    fig_temporal.update_layout(title=f"Evolução Temporal — {sel_sector}", xaxis_title="Mês", yaxis_title="Escalas por Paciente", height=420)
+    st.plotly_chart(fig_temporal, use_container_width=True)
 
 st.markdown("---")
-st.markdown("""
+st.markdown(""
 "<div style='text-align:center;color:#6B7280;padding:8px;'>" 
      <p style='margin:0;font-size:0.9rem;'>
          <b>Sistema de Análise de Escalas de Avaliação</b><br>
@@ -505,4 +436,4 @@ st.markdown("""
          © 2025 
     </p>
 </div>
-""", unsafe_allow_html=True)
+"", unsafe_allow_html=True)
