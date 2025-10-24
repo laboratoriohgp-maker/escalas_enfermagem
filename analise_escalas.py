@@ -428,7 +428,7 @@ if "Mes" in df.columns and df["Mes"].nunique() > 1:
     st.plotly_chart(fig_temporal, use_container_width=True)
 
 st.markdown("---")
-st.markdown(""
+st.markdown("""
 "<div style='text-align:center;color:#6B7280;padding:8px;'>" 
      <p style='margin:0;font-size:0.9rem;'>
          <b>Sistema de Análise de Escalas de Avaliação</b><br>
@@ -436,4 +436,4 @@ st.markdown(""
          © 2025 
     </p>
 </div>
-"", unsafe_allow_html=True)
+""", unsafe_allow_html=True)
