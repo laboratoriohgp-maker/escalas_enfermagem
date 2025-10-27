@@ -484,21 +484,21 @@ with st.sidebar:
     st.markdown("**Salvar histórico (snapshot)**")
     hist_source = st.text_input("Fonte (nome do arquivo ou descrição)", value="uploaded", help="Nome do arquivo ou descrição do snapshot")
     if st.button("💾 Salvar snapshot"):
-        if "df_uploaded_session" in st.session_state and st.session_state["df_uploaded_session"] is not None:
-            df_to_save = st.session_state["df_uploaded_session"]
-        elif 'base_df' in locals() and base_df is not None and not base_df.empty:
-            df_to_save = base_df
+        # tenta pegar dados do upload atual ou base atual
+        if "uploaded_clean" in st.session_state and st.session_state["uploaded_clean"] is not None and not st.session_state["uploaded_clean"].empty:
+            df_to_save = st.session_state["uploaded_clean"]
+        elif "base_df_current" in st.session_state and st.session_state["base_df_current"] is not None and not st.session_state["base_df_current"].empty:
+            df_to_save = st.session_state["base_df_current"]
         else:
             st.error("⚠️ Nenhum dado disponível para salvar. Faça upload de um arquivo primeiro.")
             df_to_save = None
 
         if df_to_save is not None and not df_to_save.empty:
-           # usa o nome fornecido pelo usuário no campo txt
-           nome_snap = hist_source.strip() or f"snapshot_{datetime.now():%Y-%m-%d_%H-%M-%S}.csv"
-           github_filename = upload_snapshot_to_github(df_to_save, filename=nome_snap)
-           if github_filename:
-               # Salvar automaticamente no histórico local
-               save_history_snapshot(df_to_save, source_name="GitHub", snap_name=nome_snap)
+            nome_snap = hist_source.strip() or f"snapshot_{datetime.now():%Y-%m-%d_%H-%M-%S}.csv"
+            github_filename = upload_snapshot_to_github(df_to_save, filename=nome_snap)
+            if github_filename:
+                save_history_snapshot(df_to_save, source_name="GitHub", snap_name=nome_snap)
+                st.success(f"💾 Snapshot '{nome_snap}' salvo com sucesso.")
 
     st.markdown("---")
     st.markdown("**Opções**")
