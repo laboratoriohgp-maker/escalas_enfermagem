@@ -57,7 +57,7 @@ def load_snapshot_from_github(filename):
         return pd.DataFrame(columns=["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"])
 
     url = f"https://api.github.com/repos/{repo}/contents/{filename}"
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"token {token}"}
 
     try:
         r = requests.get(url, headers=headers)
@@ -227,9 +227,9 @@ def aggregate_for_dashboard(df_subset):
     grp["Mediana_Ajustada"] = (grp["Escalas_por_Paciente"] * grp["Fator_Ajuste"]).round(2)
     return grp
 
-def save_history_snapshot(df_snapshot, source_name="uploaded"):
+def save_history_snapshot(df_snapshot, source_name="uploaded", snap_name=None):
     now = datetime.now().isoformat(timespec="seconds")
-    snap_id = str(uuid.uuid4())[:8]
+    snap_id = snap_name if snap_name else str(uuid.uuid4())[:8]
     meta = {"snapshot_id": snap_id, "timestamp": now, "source": source_name, "n_rows": len(df_snapshot)}
     hist_df = pd.DataFrame([meta])
     if HISTORY_STORE.exists():
@@ -411,7 +411,7 @@ with st.sidebar:
            github_filename = upload_snapshot_to_github(df_to_save, filename=nome_snap)
            if github_filename:
                # Salvar automaticamente no histórico local
-               save_history_snapshot(df_to_save, source_name="GitHub")
+               save_history_snapshot(df_to_save, source_name="GitHub", snap_name=nome_snap)
         
     st.subheader("📁 Snapshots disponíveis no GitHub")
     snapshots = listar_snapshots_github()
