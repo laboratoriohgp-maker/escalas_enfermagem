@@ -5,9 +5,42 @@ import plotly.graph_objects as go
 from pathlib import Path
 from PIL import Image
 import io
-import requests, base64, datetime as st
+import datetime
+import base64
+import os
+from github import Github
 from datetime import datetime
 import uuid
+
+# === Função para enviar snapshot ao GitHub ===
+def upload_snapshot_to_github(df):
+    from github import Github
+    import datetime, base64, os
+
+    # Configurações do repositório
+    GITHUB_TOKEN = "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"
+    REPO_NAME = "laboratoriohgpmaker/historicos_escalas_enfermagem"
+    FILE_PATH = "historico/historico_snapshot.csv"
+
+    # Inicializa GitHub
+    g = Github(GITHUB_TOKEN)
+    repo = g.get_repo(REPO_NAME)
+
+    # Cria conteúdo CSV com timestamp
+    csv_content = df.to_csv(index=False)
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    message = f"Snapshot salvo em {timestamp}"
+
+    # Verifica se o arquivo já existe
+    try:
+        contents = repo.get_contents(FILE_PATH)
+        # Concatena novo snapshot ao histórico
+        old_content = base64.b64decode(contents.content).decode("utf-8")
+        new_content = old_content + "\n" + csv_content
+        repo.update_file(FILE_PATH, message, new_content, contents.sha)
+    except Exception:
+        # Cria novo arquivo se não existir
+        repo.create_file(FILE_PATH, message, csv_content)
 
 # Optional PDF generation imports
 try:
