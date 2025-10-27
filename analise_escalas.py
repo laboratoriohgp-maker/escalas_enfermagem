@@ -381,20 +381,21 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**Histórico salvo (snapshots)**")
+
     hist_index = load_history_index()
-    # Listar snapshots do GitHub
+
+    # 🔹 Listar snapshots do GitHub
     github_snapshots = listar_snapshots_github()
     if github_snapshots:
-        # Criar DataFrame temporário para exibir junto com históricos locais
         df_github_snap = pd.DataFrame({
             "snapshot_id": github_snapshots,
-            "timestamp": ["GitHub"]*len(github_snapshots),
-            "source": ["GitHub"]*len(github_snapshots),
-            "n_rows": [None]*len(github_snapshots)
+            "timestamp": ["GitHub"] * len(github_snapshots),
+            "source": ["GitHub"] * len(github_snapshots),
+            "n_rows": [None] * len(github_snapshots)
         })
         hist_index = pd.concat([hist_index, df_github_snap], ignore_index=True)
 
-    # Adiciona coluna de origem com ícone visual para distinguir local e GitHub
+    # 🔹 Adiciona coluna visual de origem
     if not hist_index.empty:
         hist_index["origem"] = hist_index["source"].apply(
             lambda x: "🌐 GitHub" if x == "GitHub" else "💾 Local"
@@ -402,46 +403,80 @@ with st.sidebar:
 
     if not hist_index.empty:
         hist_index_sorted = hist_index.sort_values("timestamp", ascending=False).reset_index(drop=True)
-        st.dataframe(hist_index_sorted, use_container_width=True)
+        st.dataframe(
+            hist_index_sorted[["snapshot_id", "timestamp", "origem", "n_rows"]],
+            use_container_width=True
+        )
 
-        # Multi-select para escolher snapshots (local + GitHub)
+        # 🔹 Seleção de snapshots
         sel_ids = st.multiselect(
             "Selecione 1 ou mais snapshots para análise",
             options=hist_index_sorted["snapshot_id"].tolist(),
             default=[],
-            help="Ao selecionar, os snapshots escolhidos serão usados na análise quando 'Usar snapshots selecionados' for clicado."
+            help="Ao selecionar, os snapshots escolhidos serão usados na análise quando 'Usar snapshots selecionados' for clicado.",
+            key="multiselect_snapshots"
         )
 
-        col1, col2 = st.columns([1,1])
+        col1, col2, col3 = st.columns([1, 1, 1])
+
+        # 🔸 Apagar snapshots locais
         with col1:
             if st.button("🗑️ Apagar snapshots locais selecionados"):
-                # só apaga os locais, não os do GitHub
-                local_sel_ids = [sid for sid in sel_ids if sid in hist_index_sorted[hist_index_sorted['source']!="GitHub"]['snapshot_id'].tolist()]
+                local_sel_ids = [
+                    sid for sid in sel_ids
+                    if sid in hist_index_sorted[hist_index_sorted['source'] != "GitHub"]['snapshot_id'].tolist()
+                ]
                 if not local_sel_ids:
                     st.warning("Nenhum snapshot local selecionado para apagar.")
                 else:
                     deleted = delete_history_snapshots(local_sel_ids)
                     st.success(f"{deleted} snapshots locais apagados.")
                     st.experimental_rerun()
+
+        # 🔸 Apagar snapshots do GitHub
         with col2:
+            if st.button("🌐 Excluir do GitHub selecionados"):
+                github_sel_ids = [
+                    sid for sid in sel_ids
+                    if sid in hist_index_sorted[hist_index_sorted['source'] == "GitHub"]['snapshot_id'].tolist()
+                ]
+                if not github_sel_ids:
+                    st.warning("Nenhum snapshot do GitHub selecionado.")
+                else:
+                    token = st.secrets.get("GITHUB_TOKEN")
+                    repo = st.secrets.get("GITHUB_REPO")
+                    if not token or not repo:
+                        st.error("Configuração do GitHub ausente em st.secrets.")
+                    else:
+                        import requests
+                        headers = {"Authorization": f"token {token}"}
+                        for filename in github_sel_ids:
+                            url = f"https://api.github.com/repos/{repo}/contents/{filename}"
+                            r = requests.get(url, headers=headers)
+                            if r.status_code == 200:
+                                sha = r.json().get("sha")
+                                del_payload = {
+                                    "message": f"Removendo snapshot {filename}",
+                                    "sha": sha
+                                }
+                                resp = requests.delete(url, headers=headers, json=del_payload)
+                                if resp.status_code in (200, 204):
+                                    st.success(f"🗑️ {filename} removido do GitHub.")
+                                else:
+                                    st.error(f"Erro ao excluir {filename}: {resp.status_code}")
+                            else:
+                                st.warning(f"{filename} não encontrado no GitHub.")
+
+                        st.experimental_rerun()
+
+        # 🔸 Usar snapshots selecionados na análise
+        with col3:
             if st.button("✅ Usar snapshots selecionados na análise"):
                 if not sel_ids:
                     st.warning("Selecione ao menos um snapshot para usar.")
                 else:
                     st.session_state["use_snapshots_ids"] = sel_ids
                     st.success(f"{len(sel_ids)} snapshots marcados para uso na análise atual.")
-
-    if not hist_index.empty:
-        hist_index_sorted = hist_index.sort_values("timestamp", ascending=False).reset_index(drop=True)
-        st.dataframe(hist_index_sorted, use_container_width=True)
-
-        # 🆕 NOVO BLOCO: exclusão múltipla de arquivos GitHub direto daqui
-        github_sel = [sid for sid in sel_ids if sid in github_snapshots]
-
-        if github_sel:
-            if st.button("🗑️ Excluir do GitHub os selecionados"):
-                delete_files_from_github(github_sel)
-                st.experimental_rerun()
     else:
         st.info("Nenhum snapshot salvo ainda (local ou GitHub).")
    
