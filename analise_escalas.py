@@ -45,6 +45,33 @@ def upload_snapshot_to_github(df, filename=None):
     except Exception as e:
         st.error(f"Erro ao enviar snapshot: {e}")
 
+def load_snapshot_from_github(filename):
+    """Baixa um CSV do GitHub e retorna como DataFrame"""
+    try:
+        token = st.secrets["GITHUB_TOKEN"]
+        repo = st.secrets["GITHUB_REPO"]
+    except KeyError:
+        st.error("⚠️ Configure 'GITHUB_TOKEN' e 'GITHUB_REPO' em st.secrets.")
+        return pd.DataFrame(columns=["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"])
+
+    url = f"https://api.github.com/repos/{repo}/contents/{filename}"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    try:
+        r = requests.get(url, headers=headers)
+        if r.status_code == 200:
+            import base64
+            content = r.json()["content"]
+            decoded = base64.b64decode(content)
+            df = pd.read_csv(io.BytesIO(decoded))
+            return prepare_dataframe(df) if not df.empty else df
+        else:
+            st.error(f"❌ Falha ao carregar snapshot '{filename}' do GitHub: {r.status_code}")
+            return pd.DataFrame(columns=["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"])
+    except Exception as e:
+        st.error(f"Erro ao baixar snapshot '{filename}': {e}")
+        return pd.DataFrame(columns=["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"])
+
 def listar_snapshots_github():
     """Lista arquivos CSV salvos no repositório GitHub configurado"""
     try:
@@ -360,11 +387,21 @@ with st.sidebar:
         
     st.divider()
     st.subheader("📁 Snapshots disponíveis no GitHub")
-
     snapshots = listar_snapshots_github()
     if snapshots:
+        # Mostrar cada snapshot com botão de usar
         for s in snapshots:
-            st.write("📄", s)
+            col1, col2 = st.columns([3,1])
+            with col1:
+                st.write("📄", s)
+            with col2:
+                if st.button(f"✅ Usar {s}", key=f"use_{s}"):
+                    df_github = load_snapshot_from_github(s)
+                    if not df_github.empty:
+                        # adicionar à análise atual
+                        base_df = pd.concat([base_df, df_github], ignore_index=True)
+                        st.session_state["df_uploaded_session"] = base_df
+                        st.success(f"Snapshot '{s}' carregado na análise.")
     else:
         st.info("Nenhum snapshot disponível ainda.")
 
