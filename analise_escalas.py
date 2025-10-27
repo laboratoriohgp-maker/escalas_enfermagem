@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 from pathlib import Path
 from PIL import Image
 import io
-import base64
+import requests, base64, datetime as st
 from datetime import datetime
 import uuid
 
@@ -138,6 +138,36 @@ def aggregate_for_dashboard(df_subset):
     grp["Escalas_por_Paciente"] = grp.apply(lambda r: round(r["Qtd_Escalas"]/r["Qtd_Pacientes"],2) if r["Qtd_Pacientes"]>0 else 0.0, axis=1)
     grp["Mediana_Ajustada"] = (grp["Escalas_por_Paciente"] * grp["Fator_Ajuste"]).round(2)
     return grp
+
+# =============================
+# 🔄 SINCRONIZAÇÃO COM GITHUB
+# =============================
+
+def upload_snapshot_to_github(df, filename=None):
+    """Envia o DataFrame como CSV para o repositório GitHub configurado"""
+    token = st.secrets["GITHUB_TOKEN"]
+    repo = st.secrets["GITHUB_REPO"]
+    if not filename:
+        filename = f"snapshot_{datetime.datetime.now():%Y-%m-%d_%H-%M-%S}.csv"
+
+    # Converte o dataframe em base64
+    csv_bytes = df.to_csv(index=False).encode('utf-8')
+    b64 = base64.b64encode(csv_bytes).decode('utf-8')
+
+    # Endpoint da API do GitHub
+    url = f"https://api.github.com/repos/{repo}/contents/{filename}"
+    headers = {"Authorization": f"token {token}"}
+    data = {
+        "message": f"Novo snapshot {filename}",
+        "content": b64
+    }
+
+    response = requests.put(url, headers=headers, json=data)
+    if response.status_code in (200, 201):
+        st.success(f"✅ Snapshot '{filename}' salvo no GitHub com sucesso!")
+    else:
+        st.error(f"❌ Falha ao salvar snapshot: {response.status_code}\n{response.text}")
+
 
 def save_history_snapshot(df_snapshot, source_name="uploaded"):
     now = datetime.now().isoformat(timespec="seconds")
@@ -286,15 +316,18 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Salvar histórico (snapshot)**")
     hist_source = st.text_input("Fonte (nome do arquivo ou descrição)", value="uploaded", help="Nome do arquivo ou descrição do snapshot")
-    if st.button("💾 Salvar histórico (snapshot)"):
-        # use uploaded session df if present
-        if "df_uploaded_session" in st.session_state and st.session_state["df_uploaded_session"] is not None:
-            snap_df = st.session_state["df_uploaded_session"].copy()
-            snap_id, fname = save_history_snapshot(snap_df, source_name=hist_source or "uploaded")
-            st.success(f"Snapshot salvo: {snap_id}")
-            st.experimental_rerun()
-        else:
-            st.error("Nenhum dado preparado na sessão. Faça upload antes de salvar snapshot.")
+    if st.button("💾 Salvar snapshot"):
+        # df_atual é o dataframe com os dados que você quer salvar
+        upload_snapshot_to_github(df)
+    st.divider()
+    st.subheader("📁 Snapshots disponíveis no GitHub")
+
+    snapshots = listar_snapshots_github()
+    if snapshots:
+        for s in snapshots:
+            st.write("📄", s)
+    else:
+        st.info("Nenhum snapshot disponível ainda.")
 
     st.markdown("---")
     st.markdown("**Opções**")
