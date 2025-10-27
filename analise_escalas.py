@@ -435,14 +435,6 @@ with st.sidebar:
         hist_index_sorted = hist_index.sort_values("timestamp", ascending=False).reset_index(drop=True)
         st.dataframe(hist_index_sorted, use_container_width=True)
 
-        # Multi-select para escolher snapshots (local + GitHub)
-        sel_ids = st.multiselect(
-            "Selecione 1 ou mais snapshots para análise",
-            options=hist_index_sorted["snapshot_id"].tolist(),
-            default=[],
-            help="Ao selecionar, os snapshots escolhidos serão usados na análise quando 'Usar snapshots selecionados' for clicado."
-        )
-
         # 🆕 NOVO BLOCO: exclusão múltipla de arquivos GitHub direto daqui
         github_sel = [sid for sid in sel_ids if sid in github_snapshots]
 
