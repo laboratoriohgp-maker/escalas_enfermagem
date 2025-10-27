@@ -345,8 +345,17 @@ with st.sidebar:
     st.markdown("**Salvar histórico (snapshot)**")
     hist_source = st.text_input("Fonte (nome do arquivo ou descrição)", value="uploaded", help="Nome do arquivo ou descrição do snapshot")
     if st.button("💾 Salvar snapshot"):
-        # df_atual é o dataframe com os dados que você quer salvar
-        upload_snapshot_to_github(df)
+        if "df_uploaded_session" in st.session_state and st.session_state["df_uploaded_session"] is not None:
+            df_to_save = st.session_state["df_uploaded_session"]
+        elif 'base_df' in locals() and base_df is not None and not base_df.empty:
+            df_to_save = base_df
+        else:
+            st.error("⚠️ Nenhum dado disponível para salvar. Faça upload de um arquivo primeiro.")
+            df_to_save = None
+
+        if df_to_save is not None and not df_to_save.empty:
+            upload_snapshot_to_github(df_to_save)
+        
     st.divider()
     st.subheader("📁 Snapshots disponíveis no GitHub")
 
