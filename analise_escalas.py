@@ -8,7 +8,6 @@ import io
 import datetime
 import base64
 import os
-from github import Github
 from datetime import datetime
 import uuid
 
