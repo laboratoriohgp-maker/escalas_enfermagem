@@ -200,6 +200,26 @@ def upload_snapshot_to_github(df, filename=None):
     else:
         st.error(f"❌ Falha ao salvar snapshot: {response.status_code}\n{response.text}")
 
+def listar_snapshots_github():
+    """Lista arquivos CSV salvos no repositório GitHub configurado"""
+    import requests
+
+    token = st.secrets["GITHUB_TOKEN"]
+    repo = st.secrets["GITHUB_REPO"]
+    url = f"https://api.github.com/repos/{repo}/contents"
+    headers = {"Authorization": f"token {token}"}
+
+    try:
+        r = requests.get(url, headers=headers)
+        if r.status_code == 200:
+            arquivos = [f["name"] for f in r.json() if f["name"].endswith(".csv")]
+            return arquivos
+        else:
+            st.error(f"Erro ao buscar snapshots no GitHub: {r.status_code}")
+            return []
+    except Exception as e:
+        st.error(f"Erro ao listar snapshots: {e}")
+        return []
 
 def save_history_snapshot(df_snapshot, source_name="uploaded"):
     now = datetime.now().isoformat(timespec="seconds")
