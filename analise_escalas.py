@@ -550,7 +550,7 @@ if base_df is None or base_df.empty:
     st.stop()
 
 # Compute metrics (aplica fatores)
-df = compute_metrics(base_df, sector_adjust_map)
+df = compute_metrics(base_df)
 
 # --------------------------
 # Dashboard filters (reactive)
