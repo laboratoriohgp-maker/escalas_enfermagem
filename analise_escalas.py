@@ -96,6 +96,40 @@ def listar_snapshots_github():
         st.error(f"Erro ao listar snapshots: {e}")
         return []
 
+def delete_file_from_github(filename):
+    """Exclui um arquivo do repositório GitHub configurado nos secrets."""
+    try:
+        token = st.secrets["GITHUB_TOKEN"]
+        repo = st.secrets["GITHUB_REPO"]
+    except KeyError:
+        st.error("⚠️ Configure 'GITHUB_TOKEN' e 'GITHUB_REPO' em st.secrets para usar esta função.")
+        return False
+
+    # Primeiro, precisamos pegar o SHA do arquivo (necessário para exclusão)
+    url = f"https://api.github.com/repos/{repo}/contents/{filename}"
+    headers = {"Authorization": f"token {token}"}
+    get_resp = requests.get(url, headers=headers)
+
+    if get_resp.status_code != 200:
+        st.error(f"❌ Não foi possível encontrar '{filename}' no repositório ({get_resp.status_code}).")
+        return False
+
+    sha = get_resp.json()["sha"]
+
+    # Envia requisição DELETE
+    data = {
+        "message": f"Removendo arquivo {filename}",
+        "sha": sha
+    }
+    del_resp = requests.delete(url, headers=headers, json=data)
+
+    if del_resp.status_code in (200, 204):
+        st.success(f"🗑️ Arquivo '{filename}' removido com sucesso do GitHub.")
+        return True
+    else:
+        st.error(f"❌ Falha ao excluir '{filename}' — {del_resp.status_code}: {del_resp.text}")
+        return False
+
 # Optional PDF generation imports
 try:
     import plotly.io as pio
@@ -392,6 +426,15 @@ with st.sidebar:
                     st.success(f"{len(sel_ids)} snapshots marcados para uso na análise atual.")
     else:
         st.info("Nenhum snapshot salvo ainda (local ou GitHub).")
+    
+    st.markdown("---")
+    st.markdown("**Excluir arquivo do GitHub**")
+    file_to_delete = st.text_input("Nome do arquivo (exato):", placeholder="ex: snapshot_2025-10-27_18-45-22.csv")
+    if st.button("🗑️ Excluir do GitHub"):
+        if not file_to_delete:
+            st.warning("Informe o nome exato do arquivo para excluir.")
+        else:
+            delete_file_from_github(file_to_delete)
 
     st.markdown("---")
     st.markdown("**Salvar histórico (snapshot)**")
