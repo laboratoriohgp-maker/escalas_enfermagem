@@ -17,33 +17,35 @@ import requests
 # =============================
 
 def upload_snapshot_to_github(df, filename=None):
-    """Envia o DataFrame como CSV para o repositório GitHub configurado"""
+    """Envia o DataFrame como CSV para o GitHub e retorna o nome do arquivo salvo."""
     try:
         token = st.secrets["GITHUB_TOKEN"]
         repo = st.secrets["GITHUB_REPO"]
     except KeyError:
         st.error("⚠️ Configure 'GITHUB_TOKEN' e 'GITHUB_REPO' em st.secrets para usar esta função.")
-        return
+        return None
 
     if not filename:
         filename = f"snapshot_{datetime.now():%Y-%m-%d_%H-%M-%S}.csv"
 
-    # Converte dataframe para base64
     csv_bytes = df.to_csv(index=False).encode('utf-8')
     b64 = base64.b64encode(csv_bytes).decode('utf-8')
 
     url = f"https://api.github.com/repos/{repo}/contents/{filename}"
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"token {token}"}
     data = {"message": f"Novo snapshot {filename}", "content": b64}
 
     try:
         response = requests.put(url, headers=headers, json=data)
         if response.status_code in (200, 201):
             st.success(f"✅ Snapshot '{filename}' salvo no GitHub com sucesso!")
+            return filename
         else:
             st.error(f"❌ Falha ao salvar snapshot: {response.status_code} — {response.text}")
+            return None
     except Exception as e:
         st.error(f"Erro ao enviar snapshot: {e}")
+        return None
 
 def load_snapshot_from_github(filename):
     """Baixa um CSV do GitHub e retorna como DataFrame"""
@@ -404,7 +406,12 @@ with st.sidebar:
             df_to_save = None
 
         if df_to_save is not None and not df_to_save.empty:
-            upload_snapshot_to_github(df_to_save)
+           # usa o nome fornecido pelo usuário no campo txt
+           nome_snap = hist_source.strip() or f"snapshot_{datetime.now():%Y-%m-%d_%H-%M-%S}.csv"
+           github_filename = upload_snapshot_to_github(df_to_save, filename=nome_snap)
+           if github_filename:
+               # Salvar automaticamente no histórico local
+               save_history_snapshot(df_to_save, source_name="GitHub")
         
     st.subheader("📁 Snapshots disponíveis no GitHub")
     snapshots = listar_snapshots_github()
