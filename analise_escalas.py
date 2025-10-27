@@ -433,35 +433,84 @@ if uploaded is not None:
     except Exception as e:
         raw = None
         st.sidebar.error(f"Erro ao ler arquivo: {e}")
+
     if raw is not None:
         df_uploaded = prepare_dataframe(raw)
         if df_uploaded.empty:
             st.sidebar.error("Nenhum dado válido após normalização.")
-            st.session_state["df_uploaded_session"] = None
+            st.session_state["uploaded_clean"] = None
         else:
-            st.session_state["df_uploaded_session"] = df_uploaded
+            st.session_state["uploaded_clean"] = df_uploaded
             st.sidebar.success(f"{len(df_uploaded)} linhas preparadas na sessão (não salvas). Para salvar clique em 'Salvar histórico'.")
 else:
-    if "df_uploaded_session" not in st.session_state:
-        st.session_state["df_uploaded_session"] = None
+    # Garante que chave exista
+    if "uploaded_clean" not in st.session_state:
+        st.session_state["uploaded_clean"] = None
 
 # --------------------------
 # Build analysis base_df according to user choices
 # --------------------------
-sector_adjust_map = {"uti": fac_uti, "emerg": fac_emg, "enferm": fac_enf, "ambulatorio": fac_amb, "aloj": 0.9}
+expected_cols = ["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"]
 
-# Start with session uploaded if exists, else fallback to data_store
-if st.session_state.get("df_uploaded_session") is not None and not st.session_state["df_uploaded_session"].empty:
-    base_df = st.session_state["df_uploaded_session"].copy()
+# Sempre começar limpo
+base_df = pd.DataFrame(columns=expected_cols)
+
+# 1) Usa o upload da sessão se existir
+if st.session_state.get("uploaded_clean") is not None and not st.session_state["uploaded_clean"].empty:
+    base_df = st.session_state["uploaded_clean"].copy()
 else:
+    # 2) Se não houver upload, tenta carregar do DATA_STORE
     if DATA_STORE.exists():
         try:
-            base_df = pd.read_csv(DATA_STORE)
-            base_df = prepare_dataframe(base_df) if not base_df.empty else pd.DataFrame(columns=["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"])
+            ds = pd.read_csv(DATA_STORE)
+            ds = prepare_dataframe(ds)
+            if not ds.empty:
+                base_df = ds.copy()
         except Exception:
-            base_df = pd.DataFrame(columns=["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"])
-    else:
-        base_df = pd.DataFrame(columns=["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"])
+            base_df = pd.DataFrame(columns=expected_cols)
+
+# 3) Inclui snapshots selecionados uma única vez
+snap_ids_to_include = st.session_state.get("use_snapshots_ids", []) or []
+snap_frames = []
+if snap_ids_to_include:
+    for sid in snap_ids_to_include:
+        hist_idx = hist_index[hist_index["snapshot_id"] == sid]
+        if not hist_idx.empty and hist_idx.iloc[0].get("source") == "GitHub":
+            sdf = load_snapshot_from_github(sid)
+        else:
+            sdf = load_snapshot_df(sid)
+        if sdf is not None and not sdf.empty:
+            snap_frames.append(sdf)
+
+    if snap_frames:
+        snap_concat = pd.concat(snap_frames, ignore_index=True)
+        base_df = pd.concat([base_df, snap_concat], ignore_index=True)
+
+# 4) Se marcado para incluir todo o histórico salvo localmente
+if include_history_all:
+    try:
+        idx_all = load_history_index()
+        local_ids = idx_all[idx_all["source"] != "GitHub"]["snapshot_id"].tolist()
+        all_frames = []
+        for sid in local_ids:
+            s = load_snapshot_df(sid)
+            if not s.empty:
+                all_frames.append(s)
+        if all_frames:
+            all_concat = pd.concat(all_frames, ignore_index=True)
+            base_df = pd.concat([base_df, all_concat], ignore_index=True)
+    except Exception:
+        pass
+
+# 5) Remove duplicatas
+if not base_df.empty:
+    base_df = base_df.fillna("").copy()
+    base_df = base_df.drop_duplicates(
+        subset=["Setor","Tipo_Escala","Mes","Qtd_Escalas","Qtd_Pacientes"]
+    ).reset_index(drop=True)
+
+# Mantém base_df na sessão apenas para uso atual (sem sobrescrever o upload original)
+st.session_state["base_df_current"] = base_df.copy()
 
 # Option: include either all history, or only selected snapshots, or none
 snap_ids_to_include = st.session_state.get("use_snapshots_ids", [])
