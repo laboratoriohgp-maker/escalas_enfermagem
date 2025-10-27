@@ -346,19 +346,40 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Histórico salvo (snapshots)**")
     hist_index = load_history_index()
+    # Listar snapshots do GitHub
+    github_snapshots = listar_snapshots_github()
+    if github_snapshots:
+        # Criar DataFrame temporário para exibir junto com históricos locais
+        df_github_snap = pd.DataFrame({
+            "snapshot_id": github_snapshots,
+            "timestamp": ["GitHub"]*len(github_snapshots),
+            "source": ["GitHub"]*len(github_snapshots),
+            "n_rows": [None]*len(github_snapshots)
+        })
+        hist_index = pd.concat([hist_index, df_github_snap], ignore_index=True)
+
     if not hist_index.empty:
         hist_index_sorted = hist_index.sort_values("timestamp", ascending=False).reset_index(drop=True)
         st.dataframe(hist_index_sorted, use_container_width=True)
-        # multi-select for analysis
-        sel_ids = st.multiselect("Selecione 1 ou mais snapshots para análise", options=hist_index_sorted["snapshot_id"].tolist(), default=[], help="Ao selecionar, apenas os snapshots escolhidos serão usados na análise quando 'Usar snapshots selecionados' for clicado.")
+
+        # Multi-select para escolher snapshots (local + GitHub)
+        sel_ids = st.multiselect(
+            "Selecione 1 ou mais snapshots para análise",
+            options=hist_index_sorted["snapshot_id"].tolist(),
+            default=[],
+            help="Ao selecionar, os snapshots escolhidos serão usados na análise quando 'Usar snapshots selecionados' for clicado."
+        )
+
         col1, col2 = st.columns([1,1])
         with col1:
-            if st.button("🗑️ Apagar snapshots selecionados"):
-                if not sel_ids:
-                    st.warning("Nenhum snapshot selecionado para apagar.")
+            if st.button("🗑️ Apagar snapshots locais selecionados"):
+                # só apaga os locais, não os do GitHub
+                local_sel_ids = [sid for sid in sel_ids if sid in hist_index_sorted[hist_index_sorted['source']!="GitHub"]['snapshot_id'].tolist()]
+                if not local_sel_ids:
+                    st.warning("Nenhum snapshot local selecionado para apagar.")
                 else:
-                    deleted = delete_history_snapshots(sel_ids)
-                    st.success(f"{deleted} snapshots apagados.")
+                    deleted = delete_history_snapshots(local_sel_ids)
+                    st.success(f"{deleted} snapshots locais apagados.")
                     st.experimental_rerun()
         with col2:
             if st.button("✅ Usar snapshots selecionados na análise"):
@@ -368,7 +389,7 @@ with st.sidebar:
                     st.session_state["use_snapshots_ids"] = sel_ids
                     st.success(f"{len(sel_ids)} snapshots marcados para uso na análise atual.")
     else:
-        st.info("Nenhum snapshot salvo ainda.")
+        st.info("Nenhum snapshot salvo ainda (local ou GitHub).")
 
     st.markdown("---")
     st.markdown("**Salvar histórico (snapshot)**")
@@ -385,23 +406,23 @@ with st.sidebar:
         if df_to_save is not None and not df_to_save.empty:
             upload_snapshot_to_github(df_to_save)
         
-    st.divider()
     st.subheader("📁 Snapshots disponíveis no GitHub")
     snapshots = listar_snapshots_github()
     if snapshots:
-        # Mostrar cada snapshot com botão de usar
-        for s in snapshots:
-            col1, col2 = st.columns([3,1])
-            with col1:
-                st.write("📄", s)
-            with col2:
-                if st.button(f"✅ Usar {s}", key=f"use_{s}"):
-                    df_github = load_snapshot_from_github(s)
-                    if not df_github.empty:
-                        # adicionar à análise atual
-                        base_df = pd.concat([base_df, df_github], ignore_index=True)
-                        st.session_state["df_uploaded_session"] = base_df
-                        st.success(f"Snapshot '{s}' carregado na análise.")
+    selected_snap = st.selectbox("Selecione um snapshot do GitHub para usar", snapshots)
+    if st.button("✅ Carregar snapshot"):
+        df_github = load_snapshot_from_github(selected_snap)
+        if df_github is not None and not df_github.empty:
+            # Se base_df existir, concatene; senão, inicialize
+            if 'base_df' in locals() and base_df is not None:
+                base_df = pd.concat([base_df, df_github], ignore_index=True)
+            else:
+                base_df = df_github.copy()
+            # Atualiza sessão
+            st.session_state["df_uploaded_session"] = base_df
+            st.success(f"Snapshot '{selected_snap}' carregado na análise.")
+        else:
+            st.warning(f"Snapshot '{selected_snap}' está vazio ou não pôde ser carregado.")
     else:
         st.info("Nenhum snapshot disponível ainda.")
 
@@ -456,11 +477,26 @@ else:
         base_df = pd.DataFrame(columns=["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"])
 
 # Option: include either all history, or only selected snapshots, or none
-snap_ids_to_include = []
-if "use_snapshots_ids" in st.session_state and st.session_state["use_snapshots_ids"]:
-    snap_ids_to_include = st.session_state["use_snapshots_ids"]
-elif include_history_all and not load_history_index().empty:
-    snap_ids_to_include = load_history_index()["snapshot_id"].tolist()
+snap_ids_to_include = st.session_state.get("use_snapshots_ids", [])
+
+snap_frames = []
+for sid in snap_ids_to_include:
+    # Verifica se é snapshot local ou GitHub
+    hist_idx = hist_index[hist_index["snapshot_id"]==sid]
+    if not hist_idx.empty and hist_idx.iloc[0]["source"]=="GitHub":
+        sdf = load_snapshot_from_github(sid)
+    else:
+        sdf = load_snapshot_df(sid)
+    if sdf is not None and not sdf.empty:
+        snap_frames.append(sdf)
+
+if snap_frames:
+    snap_concat = pd.concat(snap_frames, ignore_index=True)
+    if 'base_df' in locals() and base_df is not None:
+        base_df = pd.concat([base_df, snap_concat], ignore_index=True)
+    else:
+        base_df = snap_concat.copy()
+    st.session_state["df_uploaded_session"] = base_df
 
 # Load selected snapshots
 snap_frames = []
