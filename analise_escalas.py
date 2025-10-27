@@ -550,7 +550,14 @@ if base_df is None or base_df.empty:
     st.stop()
 
 # Compute metrics (aplica fatores)
-df = compute_metrics(base_df, sector_adjust_map=None)
+sector_adjust_map = {
+    "uti": fac_uti,
+    "emerg": fac_emg,
+    "enferm": fac_enf,
+    "ambulatorio": fac_amb,
+    "aloj": 0.9  # opcional
+}
+df = compute_metrics(base_df, sector_adjust_map)
 
 # --------------------------
 # Dashboard filters (reactive)
