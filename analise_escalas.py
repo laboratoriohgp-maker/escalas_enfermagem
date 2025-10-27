@@ -412,26 +412,6 @@ with st.sidebar:
            if github_filename:
                # Salvar automaticamente no histórico local
                save_history_snapshot(df_to_save, source_name="GitHub", snap_name=nome_snap)
-        
-    st.subheader("📁 Snapshots disponíveis no GitHub")
-    snapshots = listar_snapshots_github()
-    if snapshots:
-        selected_snap = st.selectbox("Selecione um snapshot do GitHub para usar", snapshots)
-        if st.button("✅ Carregar snapshot"):
-            df_github = load_snapshot_from_github(selected_snap)
-            if df_github is not None and not df_github.empty:
-                # Se base_df existir, concatene; senão, inicialize
-                if 'base_df' in locals() and base_df is not None:
-                    base_df = pd.concat([base_df, df_github], ignore_index=True)
-                else:
-                    base_df = df_github.copy()
-                # Atualiza sessão
-                st.session_state["df_uploaded_session"] = base_df
-                st.success(f"Snapshot '{selected_snap}' carregado na análise.")
-            else:
-                st.warning(f"Snapshot '{selected_snap}' está vazio ou não pôde ser carregado.")
-    else:
-        st.info("Nenhum snapshot disponível ainda.")
 
     st.markdown("---")
     st.markdown("**Opções**")
