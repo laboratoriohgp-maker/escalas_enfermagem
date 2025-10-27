@@ -96,39 +96,39 @@ def listar_snapshots_github():
         st.error(f"Erro ao listar snapshots: {e}")
         return []
 
-def delete_file_from_github(filename):
-    """Exclui um arquivo do repositório GitHub configurado nos secrets."""
+def delete_files_from_github(filenames):
+    """Exclui uma ou mais snapshots (arquivos .csv) do repositório GitHub."""
     try:
         token = st.secrets["GITHUB_TOKEN"]
         repo = st.secrets["GITHUB_REPO"]
     except KeyError:
         st.error("⚠️ Configure 'GITHUB_TOKEN' e 'GITHUB_REPO' em st.secrets para usar esta função.")
-        return False
+        return 0
 
-    # Primeiro, precisamos pegar o SHA do arquivo (necessário para exclusão)
-    url = f"https://api.github.com/repos/{repo}/contents/{filename}"
     headers = {"Authorization": f"token {token}"}
-    get_resp = requests.get(url, headers=headers)
+    deleted_count = 0
 
-    if get_resp.status_code != 200:
-        st.error(f"❌ Não foi possível encontrar '{filename}' no repositório ({get_resp.status_code}).")
-        return False
+    for filename in filenames:
+        url = f"https://api.github.com/repos/{repo}/contents/{filename}"
+        get_resp = requests.get(url, headers=headers)
+        if get_resp.status_code != 200:
+            st.warning(f"⚠️ Arquivo '{filename}' não encontrado ({get_resp.status_code}).")
+            continue
 
-    sha = get_resp.json()["sha"]
+        sha = get_resp.json().get("sha")
+        data = {"message": f"Removendo snapshot {filename}", "sha": sha}
+        del_resp = requests.delete(url, headers=headers, json=data)
 
-    # Envia requisição DELETE
-    data = {
-        "message": f"Removendo arquivo {filename}",
-        "sha": sha
-    }
-    del_resp = requests.delete(url, headers=headers, json=data)
+        if del_resp.status_code in (200, 204):
+            deleted_count += 1
+        else:
+            st.error(f"❌ Falha ao excluir '{filename}': {del_resp.status_code} - {del_resp.text}")
 
-    if del_resp.status_code in (200, 204):
-        st.success(f"🗑️ Arquivo '{filename}' removido com sucesso do GitHub.")
-        return True
+    if deleted_count > 0:
+        st.success(f"🗑️ {deleted_count} arquivo(s) removido(s) do GitHub com sucesso.")
     else:
-        st.error(f"❌ Falha ao excluir '{filename}' — {del_resp.status_code}: {del_resp.text}")
-        return False
+        st.info("Nenhum arquivo foi excluído.")
+    return deleted_count
 
 # Optional PDF generation imports
 try:
@@ -394,6 +394,12 @@ with st.sidebar:
         })
         hist_index = pd.concat([hist_index, df_github_snap], ignore_index=True)
 
+    # Adiciona coluna de origem com ícone visual para distinguir local e GitHub
+    if not hist_index.empty:
+        hist_index["origem"] = hist_index["source"].apply(
+            lambda x: "🌐 GitHub" if x == "GitHub" else "💾 Local"
+        )
+
     if not hist_index.empty:
         hist_index_sorted = hist_index.sort_values("timestamp", ascending=False).reset_index(drop=True)
         st.dataframe(hist_index_sorted, use_container_width=True)
@@ -424,18 +430,29 @@ with st.sidebar:
                 else:
                     st.session_state["use_snapshots_ids"] = sel_ids
                     st.success(f"{len(sel_ids)} snapshots marcados para uso na análise atual.")
+
+    if not hist_index.empty:
+        hist_index_sorted = hist_index.sort_values("timestamp", ascending=False).reset_index(drop=True)
+        st.dataframe(hist_index_sorted, use_container_width=True)
+
+        # Multi-select para escolher snapshots (local + GitHub)
+        sel_ids = st.multiselect(
+            "Selecione 1 ou mais snapshots para análise",
+            options=hist_index_sorted["snapshot_id"].tolist(),
+            default=[],
+            help="Ao selecionar, os snapshots escolhidos serão usados na análise quando 'Usar snapshots selecionados' for clicado."
+        )
+
+        # 🆕 NOVO BLOCO: exclusão múltipla de arquivos GitHub direto daqui
+        github_sel = [sid for sid in sel_ids if sid in github_snapshots]
+
+        if github_sel:
+            if st.button("🗑️ Excluir do GitHub os selecionados"):
+                delete_files_from_github(github_sel)
+                st.experimental_rerun()
     else:
         st.info("Nenhum snapshot salvo ainda (local ou GitHub).")
-    
-    st.markdown("---")
-    st.markdown("**Excluir arquivo do GitHub**")
-    file_to_delete = st.text_input("Nome do arquivo (exato):", placeholder="ex: snapshot_2025-10-27_18-45-22.csv")
-    if st.button("🗑️ Excluir do GitHub"):
-        if not file_to_delete:
-            st.warning("Informe o nome exato do arquivo para excluir.")
-        else:
-            delete_file_from_github(file_to_delete)
-
+   
     st.markdown("---")
     st.markdown("**Salvar histórico (snapshot)**")
     hist_source = st.text_input("Fonte (nome do arquivo ou descrição)", value="uploaded", help="Nome do arquivo ou descrição do snapshot")
