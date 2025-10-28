@@ -47,6 +47,69 @@ def upload_snapshot_to_github(df, filename=None):
         st.error(f"Erro ao enviar snapshot: {e}")
         return None
 
+def upload_history_to_github():
+    """Envia o arquivo history_store.csv para o GitHub."""
+    try:
+        token = st.secrets["GITHUB_TOKEN"]
+        repo = st.secrets["GITHUB_REPO"]
+    except KeyError:
+        st.error("⚠️ Configure 'GITHUB_TOKEN' e 'GITHUB_REPO' em st.secrets.")
+        return
+
+    if not HISTORY_STORE.exists():
+        st.warning("Nenhum histórico local para enviar.")
+        return
+
+    with open(HISTORY_STORE, "rb") as f:
+        content = f.read()
+    b64 = base64.b64encode(content).decode("utf-8")
+
+    url = f"https://api.github.com/repos/{repo}/contents/history_store.csv"
+    headers = {"Authorization": f"token {token}"}
+
+    # Buscar SHA se arquivo já existir
+    r = requests.get(url, headers=headers)
+    sha = r.json().get("sha") if r.status_code == 200 else None
+
+    data = {
+        "message": "Atualização automática do histórico (history_store.csv)",
+        "content": b64
+    }
+    if sha:
+        data["sha"] = sha
+
+    response = requests.put(url, headers=headers, json=data)
+    if response.status_code in (200, 201):
+        st.sidebar.success("📤 Histórico atualizado no GitHub.")
+    else:
+        st.sidebar.error(f"Falha ao salvar histórico: {response.status_code} - {response.text}")
+
+
+def load_history_from_github():
+    """Baixa o history_store.csv do GitHub, se existir."""
+    try:
+        token = st.secrets["GITHUB_TOKEN"]
+        repo = st.secrets["GITHUB_REPO"]
+    except KeyError:
+        st.error("⚠️ Configure 'GITHUB_TOKEN' e 'GITHUB_REPO' em st.secrets.")
+        return pd.DataFrame(columns=["snapshot_id","timestamp","source","n_rows"])
+
+    url = f"https://api.github.com/repos/{repo}/contents/history_store.csv"
+    headers = {"Authorization": f"token {token}"}
+    r = requests.get(url, headers=headers)
+
+    if r.status_code == 200:
+        import base64
+        content = r.json()["content"]
+        decoded = base64.b64decode(content)
+        df = pd.read_csv(io.BytesIO(decoded))
+        st.sidebar.info("📥 Histórico carregado do GitHub.")
+        return df
+    else:
+        st.sidebar.warning("Nenhum histórico encontrado no GitHub.")
+        return pd.DataFrame(columns=["snapshot_id","timestamp","source","n_rows"])
+
+
 def load_snapshot_from_github(filename):
     """Baixa um CSV do GitHub e retorna como DataFrame"""
     try:
@@ -278,6 +341,14 @@ def save_history_snapshot(df_snapshot, source_name="uploaded", snap_name=None):
     return snap_id, fname.name
 
 def load_history_index():
+    """Carrega o índice de snapshots (tenta GitHub primeiro)."""
+    # Tenta carregar do GitHub
+    df_remote = load_history_from_github()
+    if not df_remote.empty:
+        df_remote.to_csv(HISTORY_STORE, index=False)  # sincroniza localmente
+        return df_remote
+
+    # Fallback: local
     if HISTORY_STORE.exists():
         try:
             return pd.read_csv(HISTORY_STORE)
@@ -394,7 +465,19 @@ with st.sidebar:
             "n_rows": [None] * len(github_snapshots)
         })
         hist_index = pd.concat([hist_index, df_github_snap], ignore_index=True)
-
+    
+    # 🔄 Sincroniza histórico do GitHub automaticamente com o history_store local
+    if github_snapshots:
+        existing = load_history_index()
+        new_entries = []
+        for snap in github_snapshots:
+            if snap not in existing["snapshot_id"].values:
+                new_entries.append({"snapshot_id": snap, "timestamp": datetime.now().isoformat(timespec="seconds"),
+                                    "source": "GitHub", "n_rows": None})
+        if new_entries:
+           updated = pd.concat([existing, pd.DataFrame(new_entries)], ignore_index=True)
+           updated.to_csv(HISTORY_STORE, index=False)
+ 
     # 🔹 Adiciona coluna visual de origem
     if not hist_index.empty:
         hist_index["origem"] = hist_index["source"].apply(
@@ -499,6 +582,7 @@ with st.sidebar:
             if github_filename:
                 save_history_snapshot(df_to_save, source_name="GitHub", snap_name=nome_snap)
                 st.success(f"💾 Snapshot '{nome_snap}' salvo com sucesso.")
+                upload_history_to_github()
 
     st.markdown("---")
     st.markdown("**Opções**")
@@ -542,6 +626,10 @@ expected_cols = ["Setor","Tipo_Escala","Qtd_Escalas","Qtd_Pacientes","Mes"]
 # Sempre começar limpo
 base_df = pd.DataFrame(columns=expected_cols)
 
+# 🔁 Limpa caches de sessão antigos para evitar duplicações
+if "df_uploaded_session" in st.session_state:
+    del st.session_state["df_uploaded_session"]
+
 # 1) Usa o upload da sessão se existir
 if st.session_state.get("uploaded_clean") is not None and not st.session_state["uploaded_clean"].empty:
     base_df = st.session_state["uploaded_clean"].copy()
@@ -556,80 +644,37 @@ else:
         except Exception:
             base_df = pd.DataFrame(columns=expected_cols)
 
-# 3) Inclui snapshots selecionados uma única vez
+# 3) Inclui snapshots selecionados (GitHub ou locais)
 snap_ids_to_include = st.session_state.get("use_snapshots_ids", []) or []
 snap_frames = []
+
 if snap_ids_to_include:
     for sid in snap_ids_to_include:
-        hist_idx = hist_index[hist_index["snapshot_id"] == sid]
-        if not hist_idx.empty and hist_idx.iloc[0].get("source") == "GitHub":
+        hist_row = hist_index[hist_index["snapshot_id"] == sid]
+        if not hist_row.empty and hist_row.iloc[0].get("source") == "GitHub":
             sdf = load_snapshot_from_github(sid)
         else:
             sdf = load_snapshot_df(sid)
-        if sdf is not None and not sdf.empty:
+        if not sdf.empty:
             snap_frames.append(sdf)
 
-    if snap_frames:
-        snap_concat = pd.concat(snap_frames, ignore_index=True)
-        base_df = pd.concat([base_df, snap_concat], ignore_index=True)
+if snap_frames:
+    base_df = pd.concat([base_df] + snap_frames, ignore_index=True)
 
-# 4) Se marcado para incluir todo o histórico salvo localmente
+# 4) Incluir todo histórico local, se marcado
 if include_history_all:
-    try:
-        idx_all = load_history_index()
-        local_ids = idx_all[idx_all["source"] != "GitHub"]["snapshot_id"].tolist()
-        all_frames = []
-        for sid in local_ids:
-            s = load_snapshot_df(sid)
-            if not s.empty:
-                all_frames.append(s)
-        if all_frames:
-            all_concat = pd.concat(all_frames, ignore_index=True)
-            base_df = pd.concat([base_df, all_concat], ignore_index=True)
-    except Exception:
-        pass
+    idx_all = load_history_index()
+    local_ids = idx_all[idx_all["source"] != "GitHub"]["snapshot_id"].tolist()
+    all_frames = [load_snapshot_df(sid) for sid in local_ids]
+    all_frames = [df for df in all_frames if not df.empty]
+    if all_frames:
+        base_df = pd.concat([base_df] + all_frames, ignore_index=True)
 
-# 5) Remove duplicatas
+# 5) Remover duplicatas
 if not base_df.empty:
-    base_df = base_df.fillna("").copy()
     base_df = base_df.drop_duplicates(
-        subset=["Setor","Tipo_Escala","Mes","Qtd_Escalas","Qtd_Pacientes"]
+        subset=["Setor", "Tipo_Escala", "Mes", "Qtd_Escalas", "Qtd_Pacientes"]
     ).reset_index(drop=True)
-
-# Mantém base_df na sessão apenas para uso atual (sem sobrescrever o upload original)
-st.session_state["base_df_current"] = base_df.copy()
-
-# Option: include either all history, or only selected snapshots, or none
-snap_ids_to_include = st.session_state.get("use_snapshots_ids", [])
-
-snap_frames = []
-for sid in snap_ids_to_include:
-    # Verifica se é snapshot local ou GitHub
-    hist_idx = hist_index[hist_index["snapshot_id"]==sid]
-    if not hist_idx.empty and hist_idx.iloc[0]["source"]=="GitHub":
-        sdf = load_snapshot_from_github(sid)
-    else:
-        sdf = load_snapshot_df(sid)
-    if sdf is not None and not sdf.empty:
-        snap_frames.append(sdf)
-
-if snap_frames:
-    snap_concat = pd.concat(snap_frames, ignore_index=True)
-    if 'base_df' in locals() and base_df is not None:
-        base_df = pd.concat([base_df, snap_concat], ignore_index=True)
-    else:
-        base_df = snap_concat.copy()
-    st.session_state["df_uploaded_session"] = base_df
-
-# Load selected snapshots
-snap_frames = []
-for sid in snap_ids_to_include:
-    sdf = load_snapshot_df(sid)
-    if not sdf.empty:
-        snap_frames.append(sdf)
-if snap_frames:
-    snap_concat = pd.concat(snap_frames, ignore_index=True)
-    base_df = pd.concat([base_df, snap_concat], ignore_index=True)
 
 # Safety: stop if nothing
 if base_df is None or base_df.empty:
