@@ -490,6 +490,8 @@ with st.sidebar:
         )
 
     if not hist_index.empty:
+        # 🧹 Remove qualquer linha que contenha o próprio arquivo de histórico
+        hist_index = hist_index[~hist_index["snapshot_id"].str.contains("history_store", case=False, na=False)].reset_index(drop=True)
         hist_index_sorted = hist_index.sort_values("timestamp", ascending=False).reset_index(drop=True)
         st.dataframe(
             hist_index_sorted[["snapshot_id", "timestamp", "origem", "n_rows"]],
