@@ -828,24 +828,54 @@ if "Mes" in df.columns and df["Mes"].nunique() > 1:
 
 st.markdown('<div class="section-title">🧠 Histórico Inteligente — Comparações Automáticas</div>', unsafe_allow_html=True)
 
-# Função auxiliar de comparação
+# ------------------------------------------------
+# Função auxiliar de comparação corrigida
+# ------------------------------------------------
 def comparar_snapshots(df1, df2, nome1="Período A", nome2="Período B"):
+    """Compara dois snapshots considerando pacientes por setor (sem duplicação)."""
+    # --- comparação por escala (Escalas e Média)
     resumo1 = df1.groupby("Tipo_Escala").agg(
         Escalas=("Qtd_Escalas", "sum"),
-        Pacientes=("Qtd_Pacientes", "max"),
         Media=("Escalas_por_Paciente", "mean")
     ).reset_index()
     resumo2 = df2.groupby("Tipo_Escala").agg(
         Escalas=("Qtd_Escalas", "sum"),
-        Pacientes=("Qtd_Pacientes", "max"),
         Media=("Escalas_por_Paciente", "mean")
     ).reset_index()
 
     merged = pd.merge(resumo1, resumo2, on="Tipo_Escala", how="outer", suffixes=(f"_{nome1}", f"_{nome2}"))
-    for col in ["Escalas", "Pacientes", "Media"]:
-        merged[f"Δ_{col}"] = merged[f"{col}_{nome2}"] - merged[f"{col}_{nome1}"]
-        merged[f"%_{col}"] = (merged[f"Δ_{col}"] / merged[f"{col}_{nome1}"].replace(0, np.nan)) * 100
-    return merged.round(2)
+    for col in ["Escalas", "Media"]:
+        merged[f"Δ_{col}"] = merged[f"{col}_{nome2}"].fillna(0) - merged[f"{col}_{nome1}"].fillna(0)
+        merged[f"%_{col}"] = np.where(
+            merged[f"{col}_{nome1}"] == 0,
+            np.nan,
+            (merged[f"Δ_{col}"] / merged[f"{col}_{nome1}"]) * 100
+        )
+
+    # --- cálculo correto de pacientes por setor ---
+    def total_pacientes(df):
+        if "Setor" not in df.columns or "Qtd_Pacientes" not in df.columns:
+            return 0
+        tmp = df.groupby("Setor")["Qtd_Pacientes"].max().fillna(0)
+        return int(tmp.sum())
+
+    tot1, tot2 = total_pacientes(df1), total_pacientes(df2)
+    delta_pat = tot2 - tot1
+    pct_pat = (delta_pat / tot1 * 100) if tot1 != 0 else np.nan
+
+    resumo_totais = pd.DataFrame([{
+        "Snapshot_Base": nome1,
+        "Snapshot_Comparado": nome2,
+        "Pacientes_Total_Base": tot1,
+        "Pacientes_Total_Comparado": tot2,
+        "Δ_Pacientes_Total": delta_pat,
+        "%_Pacientes_Total": round(pct_pat, 2),
+        "Escalas_Total_Base": int(df1["Qtd_Escalas"].sum()),
+        "Escalas_Total_Comparado": int(df2["Qtd_Escalas"].sum()),
+        "Δ_Escalas_Total": int(df2["Qtd_Escalas"].sum()) - int(df1["Qtd_Escalas"].sum())
+    }])
+
+    return merged.round(2), resumo_totais
 
 
 # ==============================
@@ -859,9 +889,6 @@ tabs = st.tabs(["📊 Análise Atual", "🔍 Comparativo entre Snapshots", "📅
 with tabs[0]:
     st.markdown("✅ Você está visualizando a análise principal atual.")
 
-# ------------------------------------------------
-# ABA 2 — Comparação direta entre snapshots
-# ------------------------------------------------
 # ------------------------------------------------
 # ABA 2 — Comparação direta entre snapshots
 # ------------------------------------------------
@@ -879,7 +906,6 @@ with tabs[1]:
             snap2 = st.selectbox("Snapshot comparação (ex: Agosto)", snaps_disp, key="cmp_snap2")
 
         if st.button("🔎 Comparar Snapshots", use_container_width=True):
-            # Detecta origem de cada snapshot (local ou GitHub)
             def carregar_snapshot(nome):
                 if nome.endswith(".csv"):
                     return load_snapshot_from_github(nome)
@@ -892,50 +918,54 @@ with tabs[1]:
             if df1.empty or df2.empty:
                 st.warning("Um dos snapshots está vazio ou não foi encontrado.")
             else:
-                comp = comparar_snapshots(df1, df2, snap1, snap2)
+                comp, resumo = comparar_snapshots(df1, df2, snap1, snap2)
                 comp.fillna(0, inplace=True)
 
                 def color_delta(v):
                     color = "green" if v > 0 else "red" if v < 0 else "gray"
                     return f"color:{color}"
 
-                st.markdown("#### 📊 Resultados Comparativos")
+                st.markdown("#### 📊 Resultados por Escala")
                 st.dataframe(
-                    comp.style.map(color_delta, subset=["%_Escalas", "%_Pacientes", "%_Media"]),
+                    comp.style.map(color_delta, subset=["%_Escalas", "%_Media"]),
                     use_container_width=True
                 )
 
-                # Sumário textual
-                mean_e = comp["%_Escalas"].mean()
-                mean_p = comp["%_Pacientes"].mean()
-                mean_m = comp["%_Media"].mean()
-                st.markdown(f"""
-                💡 De **{snap1}** para **{snap2}**:
-                - Escalas: {"📈 +"+str(round(mean_e,1))+"%" if mean_e>0 else "📉 "+str(round(mean_e,1))+"%"}
-                - Pacientes: {"📈 +"+str(round(mean_p,1))+"%" if mean_p>0 else "📉 "+str(round(mean_p,1))+"%"}
-                - Média geral: {"📈 +"+str(round(mean_m,1))+"%" if mean_m>0 else "📉 "+str(round(mean_m,1))+"%"}
-                """)
+                st.markdown("#### 🧾 Resumo de Totais (corrigido — pacientes por setor)")
+                st.table(resumo.T.rename(columns={0: "Valor"}))
+
+                # Texto resumo
+                pct_pat = resumo.at[0, "%_Pacientes_Total"]
+                pct_esc = (resumo.at[0, "Δ_Escalas_Total"] / resumo.at[0, "Escalas_Total_Base"] * 100
+                           if resumo.at[0, "Escalas_Total_Base"] != 0 else np.nan)
+
+                st.markdown(
+                    f"💡 De **{snap1}** para **{snap2}**: "
+                    f"Escalas totais: {resumo.at[0, 'Escalas_Total_Base']} → {resumo.at[0, 'Escalas_Total_Comparado']} "
+                    f"({pct_esc:.1f}%).  "
+                    f"Pacientes (por setor): {resumo.at[0, 'Pacientes_Total_Base']} → {resumo.at[0, 'Pacientes_Total_Comparado']} "
+                    f"({pct_pat:.1f}%)."
+                )
 
                 # Gráfico de variação com rótulos
                 fig_cmp = go.Figure()
                 for esc in comp["Tipo_Escala"]:
                     vals = [
-                        comp.loc[comp["Tipo_Escala"]==esc, f"%_Escalas"].values[0],
-                        comp.loc[comp["Tipo_Escala"]==esc, f"%_Pacientes"].values[0],
-                        comp.loc[comp["Tipo_Escala"]==esc, f"%_Media"].values[0]
+                        comp.loc[comp["Tipo_Escala"] == esc, "%_Escalas"].values[0],
+                        comp.loc[comp["Tipo_Escala"] == esc, "%_Media"].values[0]
                     ]
                     fig_cmp.add_trace(go.Bar(
-                        x=["Escalas", "Pacientes", "Média"],
+                        x=["% Escalas", "% Média"],
                         y=vals,
-                        text=[f"{v:.1f}%" for v in vals],
+                        text=[f"{v:.1f}%" if not pd.isna(v) else "" for v in vals],
                         textposition="outside",
                         name=esc
                     ))
                 fig_cmp.update_layout(
-                    title=f"📊 Variação Percentual — {snap1} → {snap2}",
+                    title=f"📊 Variação Percentual por Escala — {snap1} → {snap2}",
                     yaxis_title="% de Variação",
                     barmode="group",
-                    height=500
+                    height=520
                 )
                 st.plotly_chart(fig_cmp, use_container_width=True)
 
@@ -947,9 +977,16 @@ with tabs[2]:
     if "Mes" not in df.columns or df["Mes"].nunique() < 2:
         st.info("São necessários dados de pelo menos dois meses diferentes para gerar os comparativos.")
     else:
+        # cálculo de pacientes reais por mês (sem duplicar por escala)
+        escalas_por_mes = df.groupby("Mes")["Qtd_Escalas"].sum().reset_index(name="Escalas")
+        pacientes_por_mes = (df.groupby(["Mes", "Setor"])["Qtd_Pacientes"]
+                               .max().reset_index()
+                               .groupby("Mes")["Qtd_Pacientes"]
+                               .sum().reset_index(name="Pacientes"))
+        df_sum = pd.merge(escalas_por_mes, pacientes_por_mes, on="Mes", how="outer").fillna(0)
+
         df_mes = df.groupby(["Mes", "Tipo_Escala"]).agg(
             Escalas=("Qtd_Escalas", "sum"),
-            Pacientes=("Qtd_Pacientes", "max"),
             Media=("Escalas_por_Paciente", "mean")
         ).reset_index()
 
@@ -964,17 +1001,18 @@ with tabs[2]:
                 textposition="top center",
                 name=esc
             ))
-        fig1.update_layout(title="Evolução das Médias de Escalas por Paciente", xaxis_title="Mês", yaxis_title="Média")
+        fig1.update_layout(title="Evolução das Médias de Escalas por Paciente",
+                           xaxis_title="Mês", yaxis_title="Média")
         st.plotly_chart(fig1, use_container_width=True)
 
         st.markdown("#### 📊 Comparativo Geral por Mês")
-        df_sum = df.groupby("Mes").agg(Escalas=("Qtd_Escalas","sum"), Pacientes=("Qtd_Pacientes","sum")).reset_index()
         fig2 = go.Figure()
         fig2.add_trace(go.Bar(x=df_sum["Mes"], y=df_sum["Escalas"], name="Escalas Totais",
                               text=[f"{v:.0f}" for v in df_sum["Escalas"]], textposition="outside"))
         fig2.add_trace(go.Bar(x=df_sum["Mes"], y=df_sum["Pacientes"], name="Pacientes",
                               text=[f"{v:.0f}" for v in df_sum["Pacientes"]], textposition="outside"))
-        fig2.update_layout(barmode="group", title="Total de Escalas e Pacientes por Mês", yaxis_title="Quantidade")
+        fig2.update_layout(barmode="group", title="Total de Escalas e Pacientes por Mês",
+                           yaxis_title="Quantidade")
         st.plotly_chart(fig2, use_container_width=True)
 
         st.markdown("#### 📊 Média Global por Mês")
