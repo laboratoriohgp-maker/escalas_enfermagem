@@ -907,10 +907,28 @@ with tabs[1]:
 
         if st.button("🔎 Comparar Snapshots", use_container_width=True):
             def carregar_snapshot(nome):
-                if nome.endswith(".csv"):
-                    return load_snapshot_from_github(nome)
-                else:
-                    return load_snapshot_df(nome)
+                """Detecta automaticamente se o snapshot está salvo localmente ou no GitHub."""
+                # Corrige nomes tipo 'Agosto-' retirando traço ou espaços
+                nome = nome.strip().replace(" ", "").replace("-", "")
+    
+                try:
+                    # Primeiro tenta GitHub
+                    df_git = load_snapshot_from_github(nome)
+                    if not df_git.empty:
+                        return df_git
+                except Exception:
+                    pass
+    
+                try:
+                    # Depois tenta local
+                    df_local = load_snapshot_df(nome)
+                    if not df_local.empty:
+                        return df_local
+                except Exception:
+                    pass
+    
+                # Se nada encontrado
+                return pd.DataFrame()
 
             df1 = carregar_snapshot(snap1)
             df2 = carregar_snapshot(snap2)
