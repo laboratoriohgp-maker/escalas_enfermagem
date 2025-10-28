@@ -103,6 +103,9 @@ def load_history_from_github():
         content = r.json()["content"]
         decoded = base64.b64decode(content)
         df = pd.read_csv(io.BytesIO(decoded))
+        df = pd.read_csv(io.BytesIO(decoded))
+        # 🧹 Remove o próprio arquivo de histórico da listagem (para não aparecer na interface)
+        df = df[~df["snapshot_id"].str.contains("history_store", case=False, na=False)]
         st.sidebar.info("📥 Histórico carregado do GitHub.")
         return df
     else:
