@@ -454,6 +454,8 @@ with st.sidebar:
     st.markdown("**Histórico salvo (snapshots)**")
 
     hist_index = load_history_index()
+    # 🧹 Remove o arquivo de histórico da listagem de snapshots (para não confundir o usuário)
+    hist_index = hist_index[~hist_index["snapshot_id"].str.contains("history_store", case=False, na=False)].reset_index(drop=True)
 
     # 🔹 Listar snapshots do GitHub
     github_snapshots = listar_snapshots_github()
