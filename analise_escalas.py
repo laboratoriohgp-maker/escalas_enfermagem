@@ -862,6 +862,9 @@ with tabs[0]:
 # ------------------------------------------------
 # ABA 2 — Comparação direta entre snapshots
 # ------------------------------------------------
+# ------------------------------------------------
+# ABA 2 — Comparação direta entre snapshots
+# ------------------------------------------------
 with tabs[1]:
     st.markdown("### 🔍 Comparativo entre Snapshots")
     snaps_disp = hist_index["snapshot_id"].dropna().unique().tolist()
@@ -876,13 +879,21 @@ with tabs[1]:
             snap2 = st.selectbox("Snapshot comparação (ex: Agosto)", snaps_disp, key="cmp_snap2")
 
         if st.button("🔎 Comparar Snapshots", use_container_width=True):
-            df1 = load_snapshot_df(snap1)
-            df2 = load_snapshot_df(snap2)
+            # Detecta origem de cada snapshot (local ou GitHub)
+            def carregar_snapshot(nome):
+                if nome.endswith(".csv"):
+                    return load_snapshot_from_github(nome)
+                else:
+                    return load_snapshot_df(nome)
+
+            df1 = carregar_snapshot(snap1)
+            df2 = carregar_snapshot(snap2)
 
             if df1.empty or df2.empty:
                 st.warning("Um dos snapshots está vazio ou não foi encontrado.")
             else:
                 comp = comparar_snapshots(df1, df2, snap1, snap2)
+                comp.fillna(0, inplace=True)
 
                 def color_delta(v):
                     color = "green" if v > 0 else "red" if v < 0 else "gray"
@@ -895,23 +906,29 @@ with tabs[1]:
                 )
 
                 # Sumário textual
+                mean_e = comp["%_Escalas"].mean()
+                mean_p = comp["%_Pacientes"].mean()
+                mean_m = comp["%_Media"].mean()
                 st.markdown(f"""
                 💡 De **{snap1}** para **{snap2}**:
-                - Escalas: {"📈 +"+str(round(comp['%_Escalas'].mean(),1))+"%" if comp['%_Escalas'].mean()>0 else "📉 "+str(round(comp['%_Escalas'].mean(),1))+"%"}
-                - Pacientes: {"📈 +"+str(round(comp['%_Pacientes'].mean(),1))+"%" if comp['%_Pacientes'].mean()>0 else "📉 "+str(round(comp['%_Pacientes'].mean(),1))+"%"}
-                - Média geral: {"📈 +"+str(round(comp['%_Media'].mean(),1))+"%" if comp['%_Media'].mean()>0 else "📉 "+str(round(comp['%_Media'].mean(),1))+"%"}
+                - Escalas: {"📈 +"+str(round(mean_e,1))+"%" if mean_e>0 else "📉 "+str(round(mean_e,1))+"%"}
+                - Pacientes: {"📈 +"+str(round(mean_p,1))+"%" if mean_p>0 else "📉 "+str(round(mean_p,1))+"%"}
+                - Média geral: {"📈 +"+str(round(mean_m,1))+"%" if mean_m>0 else "📉 "+str(round(mean_m,1))+"%"}
                 """)
 
-                # Gráfico de variação
+                # Gráfico de variação com rótulos
                 fig_cmp = go.Figure()
                 for esc in comp["Tipo_Escala"]:
+                    vals = [
+                        comp.loc[comp["Tipo_Escala"]==esc, f"%_Escalas"].values[0],
+                        comp.loc[comp["Tipo_Escala"]==esc, f"%_Pacientes"].values[0],
+                        comp.loc[comp["Tipo_Escala"]==esc, f"%_Media"].values[0]
+                    ]
                     fig_cmp.add_trace(go.Bar(
                         x=["Escalas", "Pacientes", "Média"],
-                        y=[
-                            comp.loc[comp["Tipo_Escala"]==esc, f"%_Escalas"].values[0],
-                            comp.loc[comp["Tipo_Escala"]==esc, f"%_Pacientes"].values[0],
-                            comp.loc[comp["Tipo_Escala"]==esc, f"%_Media"].values[0]
-                        ],
+                        y=vals,
+                        text=[f"{v:.1f}%" for v in vals],
+                        textposition="outside",
                         name=esc
                     ))
                 fig_cmp.update_layout(
@@ -940,23 +957,39 @@ with tabs[2]:
         fig1 = go.Figure()
         for esc in df_mes["Tipo_Escala"].unique():
             d = df_mes[df_mes["Tipo_Escala"] == esc].sort_values("Mes")
-            fig1.add_trace(go.Scatter(x=d["Mes"], y=d["Media"], mode="lines+markers", name=esc))
+            fig1.add_trace(go.Scatter(
+                x=d["Mes"], y=d["Media"],
+                mode="lines+markers+text",
+                text=[f"{v:.2f}" for v in d["Media"]],
+                textposition="top center",
+                name=esc
+            ))
         fig1.update_layout(title="Evolução das Médias de Escalas por Paciente", xaxis_title="Mês", yaxis_title="Média")
         st.plotly_chart(fig1, use_container_width=True)
 
         st.markdown("#### 📊 Comparativo Geral por Mês")
-        fig2 = go.Figure()
         df_sum = df.groupby("Mes").agg(Escalas=("Qtd_Escalas","sum"), Pacientes=("Qtd_Pacientes","sum")).reset_index()
-        fig2.add_trace(go.Bar(x=df_sum["Mes"], y=df_sum["Escalas"], name="Escalas Totais"))
-        fig2.add_trace(go.Bar(x=df_sum["Mes"], y=df_sum["Pacientes"], name="Pacientes"))
-        fig2.update_layout(barmode="group", title="Total de Escalas e Pacientes por Mês")
+        fig2 = go.Figure()
+        fig2.add_trace(go.Bar(x=df_sum["Mes"], y=df_sum["Escalas"], name="Escalas Totais",
+                              text=[f"{v:.0f}" for v in df_sum["Escalas"]], textposition="outside"))
+        fig2.add_trace(go.Bar(x=df_sum["Mes"], y=df_sum["Pacientes"], name="Pacientes",
+                              text=[f"{v:.0f}" for v in df_sum["Pacientes"]], textposition="outside"))
+        fig2.update_layout(barmode="group", title="Total de Escalas e Pacientes por Mês", yaxis_title="Quantidade")
         st.plotly_chart(fig2, use_container_width=True)
 
         st.markdown("#### 📊 Média Global por Mês")
         media_mes = df.groupby("Mes")["Escalas_por_Paciente"].mean().reset_index()
         fig3 = go.Figure()
-        fig3.add_trace(go.Scatter(x=media_mes["Mes"], y=media_mes["Escalas_por_Paciente"], mode="lines+markers"))
-        fig3.update_layout(title="Média Global de Escalas por Paciente — Evolução Mensal", xaxis_title="Mês", yaxis_title="Média")
+        fig3.add_trace(go.Scatter(
+            x=media_mes["Mes"], y=media_mes["Escalas_por_Paciente"],
+            mode="lines+markers+text",
+            text=[f"{v:.2f}" for v in media_mes["Escalas_por_Paciente"]],
+            textposition="top center",
+            line=dict(width=3, color="#3B82F6"),
+            marker=dict(size=8)
+        ))
+        fig3.update_layout(title="Média Global de Escalas por Paciente — Evolução Mensal",
+                           xaxis_title="Mês", yaxis_title="Média")
         st.plotly_chart(fig3, use_container_width=True)
 
 st.markdown("---")
